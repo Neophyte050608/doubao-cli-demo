@@ -1,0 +1,11 @@
+{
+  "name": "doubao-login-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Doubao CLI connector login demo backed by lark-hive-ai Gateway",
+  "type": "module",
+  "bin": {"doubao-login-demo": "./bin/doubao-login-demo.mjs"},
+  "engines": {"node": ">=22"},
+  "scripts": {"test": "node --test", "pack:dry-run": "npm pack --dry-run"},
+  "files": ["bin/", "src/", "docs/doubao-connector.md", "README.md"]
+}
