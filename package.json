@@ -15,7 +15,7 @@
     "node": ">=22"
   },
   "files": [
-    "src/cli.mjs",
+    "src/",
     "README.md"
   ]
 }

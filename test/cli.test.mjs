@@ -3,6 +3,7 @@ import {spawnSync} from 'node:child_process'
 import {EventEmitter} from 'node:events'
 import {test} from 'node:test'
 
+import {loadConfig} from '../src/config.mjs'
 import {
   AUTHORIZATION_ENDPOINT,
   CONTACT_USER_ENDPOINT,
@@ -12,9 +13,8 @@ import {
   buildAuthorizationUrl,
   createOAuthCallbackServer,
   exchangeCodeForUser,
-  loadConfig,
   openBrowser,
-} from '../src/cli.mjs'
+} from '../src/oauth.mjs'
 
 const validConfig = {
   appId: 'cli_demo',
@@ -428,11 +428,8 @@ import {join} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {mkdtemp} from 'node:fs/promises'
 
-import {
-  ROOT_HELP,
-  createSessionStore,
-  runCli,
-} from '../src/cli.mjs'
+import {ROOT_HELP, runCli} from '../src/cli.mjs'
+import {createSessionStore} from '../src/session-store.mjs'
 
 function memoryStream() {
   let value = ''
