@@ -1,5 +1,4 @@
 node_modules/
 *.tgz
-.tmp/
-coverage/
+.env
 .DS_Store

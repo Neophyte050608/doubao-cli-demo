@@ -1,11 +1,21 @@
 {
   "name": "doubao-login-demo",
   "version": "0.1.0",
-  "private": true,
-  "description": "Doubao CLI connector login demo backed by lark-hive-ai Gateway",
+  "description": "Minimal standalone Feishu OAuth login demo for Doubao CLI integration",
   "type": "module",
-  "bin": {"doubao-login-demo": "./bin/doubao-login-demo.mjs"},
-  "engines": {"node": ">=22"},
-  "scripts": {"test": "node --test", "pack:dry-run": "npm pack --dry-run"},
-  "files": ["bin/", "src/", "docs/doubao-connector.md", "README.md"]
+  "bin": {
+    "doubao-login-demo": "./src/cli.mjs"
+  },
+  "scripts": {
+    "start": "node ./src/cli.mjs",
+    "test": "node --test",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "src/cli.mjs",
+    "README.md"
+  ]
 }
