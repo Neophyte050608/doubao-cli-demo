@@ -16,7 +16,7 @@ import {
   getDataDirectory,
 } from './session-store.mjs'
 
-const VERSION = '0.1.2'
+const VERSION = '0.1.1'
 const EXIT_OK = 0
 const EXIT_NOT_LOGGED_IN = 1
 const EXIT_OPERATIONAL = 2

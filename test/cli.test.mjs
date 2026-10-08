@@ -301,7 +301,7 @@ async function createCliHarness({backend = fakeBackend()} = {}) {
     stdout,
     stderr,
     dependencies: {
-      version: '0.1.2',
+      version: '0.1.1',
       stdout,
       stderr,
       environment: {DOUBAO_CLI_DEMO_BACKEND_URL: 'http://127.0.0.1:8787'},
@@ -321,7 +321,7 @@ test('installed bin symlink runs the CLI entrypoint', async () => {
   await symlink(fileURLToPath(new URL('../src/cli.mjs', import.meta.url)), executable)
   const result = spawnSync(executable, ['--version'], {encoding: 'utf8'})
   assert.equal(result.status, 0)
-  assert.equal(result.stdout, '0.1.2\n')
+  assert.equal(result.stdout, '0.1.1\n')
 })
 
 test('help lists the connector commands', async () => {
