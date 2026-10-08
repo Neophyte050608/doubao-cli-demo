@@ -72,10 +72,10 @@ Demo 只通过用户 OAuth 读取登录者自身的基本信息（`name`、`open
 
 要求 Node.js 22 或更高版本。
 
-从 GitHub `v0.1.0` 安装 CLI：
+从 GitHub `main` 安装 CLI：
 
 ```bash
-npm install --global https://github.com/Neophyte050608/doubao-cli-login-demo.git#v0.1.0
+npm install --global https://github.com/Neophyte050608/doubao-cli-demo.git
 ```
 
 也可以在源码目录直接运行 CLI 与后端：
