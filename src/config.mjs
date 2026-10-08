@@ -1,16 +1,59 @@
+import {readFileSync} from 'node:fs'
 import {chmod, mkdir, readFile, rename, rm, writeFile} from 'node:fs/promises'
-import {join} from 'node:path'
+import {dirname, join, resolve} from 'node:path'
 import process from 'node:process'
+import {fileURLToPath} from 'node:url'
 
 import {CliError} from './errors.mjs'
 
-export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8787'
+export const FALLBACK_BACKEND_URL = 'http://127.0.0.1:8787'
+export const PACKAGE_DEFAULT_HOST_FIELD = 'config.default_host'
 const ENV_BACKEND_URL = 'DOUBAO_CLI_DEMO_BACKEND_URL'
+const PACKAGE_NAME = 'doubao-cli-demo'
+
+let packageDefaultBackendUrl
+
+// Like lark-hive-cli, the distributable can carry its service endpoint in
+// package.json config.default_host. This keeps the default backend address a
+// package-level configuration value instead of burying it in command logic.
+export function getPackageDefaultBackendUrl({startDir = dirname(fileURLToPath(import.meta.url))} = {}) {
+  if (packageDefaultBackendUrl !== undefined) return packageDefaultBackendUrl
+
+  let currentDir = startDir
+  for (let depth = 0; depth < 8; depth += 1) {
+    try {
+      const packageJsonPath = resolve(currentDir, 'package.json')
+      const packageMetadata = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
+      if (packageMetadata?.name === PACKAGE_NAME) {
+        const configuredHost = packageMetadata?.config?.default_host
+        packageDefaultBackendUrl = typeof configuredHost === 'string' && configuredHost.trim()
+          ? normalizeBackendUrl(configuredHost, PACKAGE_DEFAULT_HOST_FIELD)
+          : FALLBACK_BACKEND_URL
+        return packageDefaultBackendUrl
+      }
+    } catch {
+      // Source and installed package layouts differ; keep walking upward.
+    }
+
+    const parentDir = dirname(currentDir)
+    if (parentDir === currentDir) break
+    currentDir = parentDir
+  }
+
+  packageDefaultBackendUrl = FALLBACK_BACKEND_URL
+  return packageDefaultBackendUrl
+}
+
+export function resetPackageDefaultBackendUrlCacheForTests() {
+  packageDefaultBackendUrl = undefined
+}
 
 // The CLI only needs to know where the backend lives. It never holds the
 // Feishu app secret: all OAuth happens on the backend.
 export function loadConfig(environment = process.env, options = {}) {
-  const raw = options.host?.trim() || environment[ENV_BACKEND_URL]?.trim() || DEFAULT_BACKEND_URL
+  const raw = options.host?.trim()
+    || environment[ENV_BACKEND_URL]?.trim()
+    || getPackageDefaultBackendUrl(options)
   return {backendUrl: normalizeBackendUrl(raw, options.source ?? ENV_BACKEND_URL)}
 }
 

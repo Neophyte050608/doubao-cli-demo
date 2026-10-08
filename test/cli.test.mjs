@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import {spawnSync} from 'node:child_process'
 import {EventEmitter} from 'node:events'
-import {readFile, stat, symlink, mkdtemp} from 'node:fs/promises'
+import {mkdir, readFile, stat, symlink, mkdtemp, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {test} from 'node:test'
@@ -9,7 +9,12 @@ import {fileURLToPath} from 'node:url'
 
 import {createBackendClient} from '../src/backend.mjs'
 import {ROOT_HELP, runCli} from '../src/cli.mjs'
-import {createConfigStore, loadConfig} from '../src/config.mjs'
+import {
+  createConfigStore,
+  getPackageDefaultBackendUrl,
+  loadConfig,
+  resetPackageDefaultBackendUrlCacheForTests,
+} from '../src/config.mjs'
 import {openBrowser} from '../src/browser.mjs'
 import {login, interpretPoll, waitForLogin} from '../src/login.mjs'
 import {createSessionStore} from '../src/session-store.mjs'
@@ -44,7 +49,8 @@ async function expectCliError(promise, expectedCode) {
 
 // ---- config ----
 
-test('config defaults to the loopback backend URL', () => {
+test('config defaults to package.json config.default_host', () => {
+  resetPackageDefaultBackendUrlCacheForTests()
   assert.deepEqual(loadConfig({}), {backendUrl: 'http://127.0.0.1:8787'})
 })
 
@@ -53,6 +59,19 @@ test('config reads and normalizes the backend URL', () => {
     loadConfig({DOUBAO_CLI_DEMO_BACKEND_URL: 'https://demo.example.com/'}),
     {backendUrl: 'https://demo.example.com'},
   )
+})
+
+test('package default host is read from the nearest package.json', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'doubao-cli-default-host-'))
+  await mkdir(join(directory, 'dist', 'src'), {recursive: true})
+  await writeFile(
+    join(directory, 'package.json'),
+    JSON.stringify({name: 'doubao-cli-demo', config: {default_host: 'https://cloud.example.com/base'}}, null, 2),
+  )
+
+  resetPackageDefaultBackendUrlCacheForTests()
+  assert.equal(getPackageDefaultBackendUrl({startDir: join(directory, 'dist', 'src')}), 'https://cloud.example.com')
+  resetPackageDefaultBackendUrlCacheForTests()
 })
 
 test('config rejects a non-http backend URL', () => {
@@ -282,7 +301,7 @@ async function createCliHarness({backend = fakeBackend()} = {}) {
     stdout,
     stderr,
     dependencies: {
-      version: '0.1.1',
+      version: '0.1.2',
       stdout,
       stderr,
       environment: {DOUBAO_CLI_DEMO_BACKEND_URL: 'http://127.0.0.1:8787'},
@@ -302,7 +321,7 @@ test('installed bin symlink runs the CLI entrypoint', async () => {
   await symlink(fileURLToPath(new URL('../src/cli.mjs', import.meta.url)), executable)
   const result = spawnSync(executable, ['--version'], {encoding: 'utf8'})
   assert.equal(result.status, 0)
-  assert.equal(result.stdout, '0.1.1\n')
+  assert.equal(result.stdout, '0.1.2\n')
 })
 
 test('help lists the connector commands', async () => {

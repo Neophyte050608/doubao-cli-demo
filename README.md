@@ -85,7 +85,15 @@ doubao-cli-demo --version      # 版本检查
 doubao-cli-demo --help
 ```
 
-CLI 默认访问 `http://127.0.0.1:8787`。如果后端不在本机，可以像 `lark-hive-cli` 一样配置默认后端地址：
+CLI 的内置默认后端地址和 `lark-hive-cli` 一样放在 `package.json` 配置里：
+
+```json
+"config": {
+  "default_host": "http://127.0.0.1:8787"
+}
+```
+
+发布云版 CLI 时，只要把这里改成云上后端，例如 `https://<你的云后端域名>`，用户安装后不额外配置也会默认连云上后端。如果某个环境需要覆盖内置默认值，再用本地配置：
 
 ```bash
 doubao-cli-demo config host set 'https://<后端地址>'
@@ -100,7 +108,7 @@ doubao-cli-demo auth poll <login-session-id> --host 'https://<后端地址>'
 doubao-cli-demo whoami --host 'https://<后端地址>'
 ```
 
-后端地址优先级：`--host` > `config host set` 持久化配置 > `DOUBAO_CLI_DEMO_BACKEND_URL` 环境变量 > 默认 `http://127.0.0.1:8787`。
+后端地址优先级：`--host` > `config host set` 持久化配置 > `DOUBAO_CLI_DEMO_BACKEND_URL` 环境变量 > `package.json` 的 `config.default_host` > 兜底 `http://127.0.0.1:8787`。
 
 ### 4.2 部署后端（持有 App Secret 的机器，例如开发机）
 
@@ -135,7 +143,7 @@ cloudflared tunnel --url http://127.0.0.1:8787
 
 1. 后端 `.env` 的 `FEISHU_REDIRECT_URI=https://xxxx.ngrok-free.app/auth/callback`
 2. 飞书开发者后台的「重定向 URL」填同一个值
-3. CLI 的后端地址：推荐执行 `doubao-cli-demo config host set https://xxxx.ngrok-free.app`，或把 `DOUBAO_CLI_DEMO_BACKEND_URL=https://xxxx.ngrok-free.app` 注入 CLI 运行环境
+3. CLI 的后端地址：如果当前安装包的 `package.json config.default_host` 已经是这个公网地址，则不用额外配置；否则执行 `doubao-cli-demo config host set https://xxxx.ngrok-free.app`，或把 `DOUBAO_CLI_DEMO_BACKEND_URL=https://xxxx.ngrok-free.app` 注入 CLI 运行环境
 
 > 纯本机验证（CLI、后端、浏览器都在同一台机器）不需要穿透，直接用 `http://127.0.0.1:8787` 即可。
 
@@ -163,7 +171,10 @@ PORT=8787
 **CLI 机器**（只需要知道后端在哪；App Secret 不在这里）：
 
 ```bash
-# 方式 1：持久化保存，推荐，行为类似 lark-hive-cli
+# 方式 0：包内置默认值，行为类似 lark-hive-cli
+# 修改 package.json 的 config.default_host 后发布/安装即可生效。
+
+# 方式 1：持久化覆盖，推荐用于临时切换环境
 doubao-cli-demo config host set 'http://127.0.0.1:8787'
 
 # 方式 2：环境变量，适合连接器/CI 注入
@@ -173,7 +184,7 @@ export DOUBAO_CLI_DEMO_BACKEND_URL='http://127.0.0.1:8787'
 doubao-cli-demo auth login --host 'http://127.0.0.1:8787'
 ```
 
-> 全局安装后在任意目录执行 CLI 时，如果没有持久化配置、当前目录也没有 `.env`，才需要 `export DOUBAO_CLI_DEMO_BACKEND_URL=...`。
+> 全局安装后在任意目录执行 CLI 时，会先读用户本地的 `config host set`，再读环境变量，最后读安装包自己的 `package.json config.default_host`。
 
 不要把真实 App Secret 写入源码、GitHub、普通文档或截图。App Secret 只存在于**后端机器**，绝不进入 CLI 分发物。`.env` 已在 `.gitignore` 中；曾经粘贴到聊天里的 Secret 应先在开发者后台重置。
 
@@ -190,9 +201,9 @@ npm run server
 **第二步，用 CLI 登录并查身份**：
 
 ```bash
-doubao-cli-demo config host set http://127.0.0.1:8787  # 后端不在默认地址时改成实际地址
+doubao-cli-demo config host set http://127.0.0.1:8787  # 后端不在内置默认地址时才需要
 doubao-cli-demo auth login     # 浏览器授权，成功后：Logged in as 示例用户
-doubao-cli-demo auth status    # 本地检查，已登录首行固定 "Logged in"
+doubao-cli-demo auth status --json  # 本地检查，便于连接器用 JSON 正则判断
 doubao-cli-demo whoami --json  # 实时调用后端 /api/me
 ```
 
@@ -230,14 +241,14 @@ doubao-cli-demo auth logout
 | 安装命令 | `npm install --global https://github.com/Neophyte050608/doubao-cli-demo.git` |
 | 版本检查命令 | `doubao-cli-demo --version` |
 | 帮助命令 | `doubao-cli-demo --help` |
-| 后端地址预配置命令 | `doubao-cli-demo config host set <你的后端 URL>` |
+| 后端地址预配置命令 | 如果安装包 `config.default_host` 已是目标后端，可不填；否则填 `doubao-cli-demo config host set <你的后端 URL>` |
 | 授权（登录）命令 | `doubao-cli-demo auth login` |
-| 授权状态命令 | `doubao-cli-demo auth status` |
-| 已登录匹配正则 | `^Logged in$` |
+| 授权状态命令 | `doubao-cli-demo auth status --json` |
+| 已登录匹配正则 | `.*"loggedIn"\s*:\s*true.*` |
 | 取消授权（退出）命令 | `doubao-cli-demo auth logout` |
 | 当前用户命令 | `doubao-cli-demo whoami --json` |
 
-如果连接器支持安装后/授权前执行预配置命令，优先用 `doubao-cli-demo config host set <你的后端 URL>`；否则把 `DOUBAO_CLI_DEMO_BACKEND_URL=<你的后端 URL>` 注入连接器运行 CLI 的环境。App Secret 等飞书凭证只需配置在**后端**运行环境，不要注入到 CLI。
+如果连接器支持安装后/授权前执行预配置命令，可以用 `doubao-cli-demo config host set <你的后端 URL>` 覆盖内置默认值；否则把 `DOUBAO_CLI_DEMO_BACKEND_URL=<你的后端 URL>` 注入连接器运行 CLI 的环境。App Secret 等飞书凭证只需配置在**后端**运行环境，不要注入到 CLI。
 
 ## 9. 本机、内网、公网和云电脑
 
