@@ -2,54 +2,30 @@ import process from 'node:process'
 
 import {CliError} from './errors.mjs'
 
-const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:8787/callback'
+const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8787'
 
-function requiredEnvironmentValue(environment, name) {
-  const value = environment[name]
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new CliError('INVALID_CONFIGURATION', `Missing environment variable: ${name}`)
-  }
-  return value
-}
+// The CLI only needs to know where the backend lives. It never holds the
+// Feishu app secret: all OAuth happens on the backend.
+export function loadConfig(environment = process.env) {
+  const raw =
+    environment.DOUBAO_LOGIN_DEMO_BACKEND_URL?.trim() || DEFAULT_BACKEND_URL
 
-export function validateRedirectUri(value) {
-  let redirectUri
+  let backendUrl
   try {
-    redirectUri = new URL(value)
+    backendUrl = new URL(raw)
   } catch {
     throw new CliError(
-      'INVALID_REDIRECT_URI',
-      'FEISHU_REDIRECT_URI must be a valid loopback URL.',
+      'INVALID_CONFIGURATION',
+      'DOUBAO_LOGIN_DEMO_BACKEND_URL must be a valid URL.',
     )
   }
-
-  const isIpv4Loopback = redirectUri.hostname === '127.0.0.1'
-  const isIpv6Loopback = redirectUri.hostname === '[::1]'
-  const isValid =
-    redirectUri.protocol === 'http:' &&
-    (isIpv4Loopback || isIpv6Loopback) &&
-    redirectUri.port !== '' &&
-    redirectUri.username === '' &&
-    redirectUri.password === '' &&
-    redirectUri.search === '' &&
-    redirectUri.hash === ''
-
-  if (!isValid) {
+  if (backendUrl.protocol !== 'http:' && backendUrl.protocol !== 'https:') {
     throw new CliError(
-      'INVALID_REDIRECT_URI',
-      'FEISHU_REDIRECT_URI must use HTTP, an explicit loopback address and port, and contain no credentials, query, or fragment.',
+      'INVALID_CONFIGURATION',
+      'DOUBAO_LOGIN_DEMO_BACKEND_URL must use http or https.',
     )
   }
 
-  return redirectUri
-}
-
-export function loadConfig(environment = process.env) {
-  const appId = requiredEnvironmentValue(environment, 'FEISHU_APP_ID')
-  const appSecret = requiredEnvironmentValue(environment, 'FEISHU_APP_SECRET')
-  const redirectUri =
-    environment.FEISHU_REDIRECT_URI?.trim() || DEFAULT_REDIRECT_URI
-  validateRedirectUri(redirectUri)
-
-  return {appId, appSecret, redirectUri}
+  // Normalize to an origin string without a trailing slash.
+  return {backendUrl: backendUrl.origin}
 }

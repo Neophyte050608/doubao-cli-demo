@@ -1,153 +1,141 @@
 # doubao-login-demo
 
-一个用于豆包企业 CLI Connector 集成验证的完整、独立飞书登录 Demo。
+一个用于豆包企业 CLI Connector 集成验证的飞书登录 Demo，采用贴近真实业务的 **CLI + 后端** 两段式架构。
 
-它具备企业连接器需要的基本 CLI 生命周期：
+- **CLI**（分发给用户）：驱动登录、保存后端下发的会话、调用后端业务接口。它**不持有** App Secret，也不直接访问飞书。
+- **后端**（你自己部署，持有 App Secret）：承接飞书 OAuth 回调、用 App Secret 换取用户身份、下发会话、提供唯一的业务接口 `GET /api/me`（返回"我是谁"）。
+
+Demo 使用飞书开发者后台的企业自建应用完成 OAuth，但不依赖 `lark-hive-ai`、Gateway、core-api、数据库或 Redis，也没有多余的业务功能。
 
 ```bash
 doubao-login-demo --version
 doubao-login-demo --help
 doubao-login-demo auth login
-doubao-login-demo auth status
-doubao-login-demo auth status --json
-doubao-login-demo whoami
-doubao-login-demo whoami --json
-doubao-login-demo auth logout
+doubao-login-demo auth status [--json]
+doubao-login-demo whoami [--json]
+doubao-login-demo auth logout [--json]
 ```
-
-Demo 使用飞书开发者后台的企业自建应用完成 OAuth 登录，但不依赖 `lark-hive-ai`、Gateway、core-api、数据库、Redis 或其他常驻服务，也不包含业务功能。
 
 ## 1. 工作方式
 
 ```text
-豆包/终端执行 CLI
-  → CLI 在当前机器临时监听 127.0.0.1:8787
-  → 打开飞书 OAuth 授权页面
-  → 飞书浏览器回调当前机器
-  → CLI 使用 App ID + App Secret 换取 user_access_token
-  → 查询当前用户的 name 和 open_id
-  → 以应用身份取得 tenant_access_token
-  → 按 open_id 查询通讯录 user_id（employeeId）
-  → 加密保存身份状态，立即丢弃两个 access token
+CLI                         后端 (持有 App Secret)              飞书
+ │ auth login
+ │ 1. POST /auth/start ───────────▶ 生成 state，返回授权 URL + device_code
+ │ 2. 打开浏览器授权 ───────────────────────────────────────▶ 飞书授权页
+ │                        3. 浏览器回调 ◀──────────────────────┘
+ │                           GET /auth/callback?code&state
+ │                           后端用 App Secret 换 token、取 user_info
+ │                           生成 session_token
+ │ 4. 轮询 /auth/poll ────────────▶ 完成后返回 session_token
+ │    CLI 加密保存 session_token
+ │
+ │ whoami → GET /api/me ──────────▶ 用 session_token 返回 {name, openId, unionId}
 ```
 
-本地回调服务只在 `auth login` 执行期间运行，成功、拒绝、失败或五分钟超时后自动关闭。因此，本机或同一台云电脑测试不需要部署远程服务器。
+关键点：**App Secret 只在后端**；CLI 只认识后端地址。`auth status` 是本地检查（是否持有会话），`whoami` 是**实时调用后端 `/api/me`**，用来证明"带着会话去调业务接口"这条链路真实可用。
 
-## 2. 飞书开发者后台
+## 2. 职责与凭证边界
 
-创建企业自建应用，并配置重定向 URL：
+| 项 | 位置 | 说明 |
+| --- | --- | --- |
+| `FEISHU_APP_ID` | 后端 | 公开信息 |
+| `FEISHU_APP_SECRET` | **仅后端** | 机密，绝不进入 CLI 或分发物 |
+| OAuth 回调 `/auth/callback` | 后端 | 飞书需能回调到它 |
+| 换 token / 取 user_info | 后端 | 使用 App Secret |
+| 业务接口 `/api/me` | 后端 | 唯一业务功能：识别调用者 |
+| 打开浏览器、保存会话、`whoami` | CLI | 客户端职责 |
+
+## 3. 飞书开发者后台
+
+创建企业自建应用，并把重定向 URL 配成**后端**的回调地址：
 
 ```text
-http://127.0.0.1:8787/callback
+本地开发：http://127.0.0.1:8787/auth/callback
+生产环境：https://<你的后端域名>/auth/callback
 ```
 
-该值必须与 `FEISHU_REDIRECT_URI` 完全一致，包括协议、IP、端口和路径。
+该值必须与后端的 `FEISHU_REDIRECT_URI` 完全一致（协议、域名/IP、端口、路径）。
 
-按企业方案在权限管理中开通并发布：
+Demo 只通过用户 OAuth 读取登录者自身的基本信息（`name`、`open_id`、`union_id`），由 `authen/v1/user_info` 直接返回，**不需要**通讯录（`contact:*`）权限，也不需要应用身份（tenant_access_token）。把测试账号加入应用可用范围并创建发布版本即可。
 
-```text
-contact:user.employee_id:readonly（应用身份，通讯录全部成员）
-```
-
-这是应用身份权限，不会被写进浏览器 OAuth 的 `scope` 参数。Demo 先通过用户 OAuth 确认登录者的 `name` 和 `open_id`，再以应用身份调用通讯录接口，将该 `open_id` 解析为响应中的 `user_id`，并在 CLI 输出中命名为 `employeeId`。Demo 不请求 `component:user_profile` 或 `offline_access`。
-
-完成权限配置后，需要创建并发布应用版本，并确保测试账号处于应用可用范围内。
-
-## 3. 安装
+## 4. 安装
 
 要求 Node.js 22 或更高版本。
 
-从 GitHub `v0.1.0` 安装：
+从 GitHub `v0.1.0` 安装 CLI：
 
 ```bash
 npm install --global https://github.com/Neophyte050608/doubao-cli-login-demo.git#v0.1.0
 ```
 
-验证：
+也可以在源码目录直接运行 CLI 与后端：
 
 ```bash
-doubao-login-demo --version
-doubao-login-demo --help
+node ./src/cli.mjs --help      # CLI
+npm run server                 # 后端（等价于 node ./server/server.mjs）
 ```
 
-也可以在源码目录直接运行：
+## 5. 配置
+
+后端和 CLI 都会在启动时自动从**当前工作目录**加载 `.env`（不会覆盖已 `export` 的同名变量）。可复制 `.env.example`：
 
 ```bash
-node ./src/cli.mjs --help
+# 后端（持有凭证）
+FEISHU_APP_ID='cli_xxx'
+FEISHU_APP_SECRET='替换为新密钥'
+FEISHU_REDIRECT_URI='http://127.0.0.1:8787/auth/callback'
+PORT=8787
+
+# CLI（后端地址）
+DOUBAO_LOGIN_DEMO_BACKEND_URL='http://127.0.0.1:8787'
 ```
 
-## 4. 配置应用凭证
+不要把真实 App Secret 写入源码、GitHub、普通文档或截图。`.env` 已在 `.gitignore` 中；曾经粘贴到聊天里的 Secret 应先在开发者后台重置。
 
-CLI 从运行环境读取：
+## 6. 运行
+
+**第一步，起后端**（持有凭证的那端）：
 
 ```bash
-export FEISHU_APP_ID='cli_xxx'
-export FEISHU_APP_SECRET='替换为新密钥'
-export FEISHU_REDIRECT_URI='http://127.0.0.1:8787/callback'
+npm run server
+# Doubao login demo backend listening on http://127.0.0.1:8787
+# Feishu redirect URI: http://127.0.0.1:8787/auth/callback
 ```
 
-`FEISHU_REDIRECT_URI` 可以省略，默认就是上述本机回调地址。
-
-代码不会自动读取 `.env`。不要把真实 App Secret 写入源码、GitHub、普通文档或截图。曾经粘贴到聊天中的 Secret 应先在开发者后台重置。
-
-## 5. 登录和身份查询
-
-登录：
+**第二步，用 CLI 登录并查身份**：
 
 ```bash
-doubao-login-demo auth login
+doubao-login-demo auth login     # 浏览器授权，成功后：Logged in as 示例用户
+doubao-login-demo auth status    # 本地检查，已登录首行固定 "Logged in"
+doubao-login-demo whoami --json  # 实时调用后端 /api/me
 ```
 
-登录成功：
-
-```text
-Logged in as 示例用户
-```
-
-检查连接器登录状态：
-
-```bash
-doubao-login-demo auth status
-```
-
-已登录时首行固定输出：
-
-```text
-Logged in
-```
-
-未登录时输出：
-
-```text
-Not logged in
-```
-
-并返回退出码 `1`。
-
-查询当前身份：
-
-```bash
-doubao-login-demo whoami
-doubao-login-demo whoami --json
-```
-
-JSON 示例：
+`whoami --json` 输出示例：
 
 ```json
-{"name":"示例用户","openId":"ou_xxx","employeeId":"employee_xxx"}
+{"name":"示例用户","openId":"ou_xxx","unionId":"on_xxx"}
 ```
 
-当前 Demo 能识别最近完成飞书 OAuth 的用户姓名、`open_id` 和通讯录响应中的 `user_id`（输出为 `employeeId`）。它不查询部门、手机号或邮箱。
-
-退出登录：
+`open_id` 是用户在本应用内的唯一标识，`union_id` 是用户在同一开发者名下所有应用间一致的标识。退出登录：
 
 ```bash
 doubao-login-demo auth logout
 ```
 
-该命令删除本机加密 session 和密钥。
+## 7. 后端 HTTP 契约
 
-## 6. 豆包企业 CLI Connector 配置
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/auth/start` | 开始登录，返回 `authorizationUrl`、`deviceCode`、`pollInterval` |
+| `GET` | `/auth/callback` | 飞书回调；后端换取身份并生成会话 |
+| `GET` | `/auth/poll?device_code=` | 轮询登录结果，完成时返回 `sessionToken` |
+| `GET` | `/api/me` | 业务接口，`Authorization: Bearer <sessionToken>` → `{name, openId, unionId}` |
+| `GET` | `/healthz` | 健康检查 |
+
+会话存在后端内存中（demo 简化；重启即失效）。真实系统可换成持久化存储。
+
+## 8. 豆包企业 CLI Connector 配置
 
 | 配置项 | 值 |
 | --- | --- |
@@ -161,43 +149,46 @@ doubao-login-demo auth logout
 | 退出登录命令 | `doubao-login-demo auth logout` |
 | 当前用户命令 | `doubao-login-demo whoami --json` |
 
-Connector 运行 CLI 时必须能读取 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 和可选的 `FEISHU_REDIRECT_URI`。安装 npm 包本身不会注入这些值。
+Connector 运行 CLI 时必须能读取 `DOUBAO_LOGIN_DEMO_BACKEND_URL`（后端地址）。App Secret 等飞书凭证只需配置在**后端**运行环境，不要注入到 CLI。
 
-## 7. 本地状态与安全边界
+## 9. 本机、内网、公网和云电脑
 
-默认保存位置：
+后端承接飞书回调，所以"浏览器能否访问到后端的回调地址"决定了部署方式：
+
+| 场景 | 后端部署 | 说明 |
+| --- | --- | --- |
+| 本机运行 CLI + 后端 + 浏览器 | 本机 `127.0.0.1:8787` | 浏览器回调到本机后端 |
+| 同一台云电脑运行三者 | 云电脑本地后端 | 回调到云电脑自身 |
+| 内网机器，能出网访问飞书 | 内网后端 + 浏览器同网 | 浏览器需能访问后端回调地址 |
+| 豆包在云端执行 CLI，用户在本地浏览器授权 | **公网 HTTPS 后端** | 回调地址必须是浏览器可达的公网 URL |
+| 多用户 / 正式环境 | 公网 HTTPS 后端 | 推荐，`FEISHU_REDIRECT_URI` 配公网域名 |
+
+CLI 可以在任意机器，只要它能访问 `DOUBAO_LOGIN_DEMO_BACKEND_URL`；浏览器只要能访问后端的 `/auth/callback`。
+
+## 10. 本地状态与安全边界
+
+CLI 默认保存位置：
 
 - macOS/Linux：`${XDG_CONFIG_HOME:-~/.config}/doubao-login-demo/`
-- Windows：`%APPDATA%\\doubao-login-demo\\`
+- Windows：`%APPDATA%\doubao-login-demo\`
 
 文件：
 
-- `session.json.enc`：AES-256-GCM 加密后的用户身份状态；
-- `session.key`：本机随机密钥。
+- `session.json.enc`：AES-256-GCM 加密后的会话（含后端下发的 `sessionToken` 与缓存身份）；
+- `session.key`：本机随机密钥（POSIX 权限 `0600`）。
 
-POSIX 系统中两个文件权限均为 `0600`。本 Demo 只保存 `name`、`openId`、`employeeId` 和登录时间，不保存飞书 `user_access_token`、`tenant_access_token` 或 `refresh_token`；`auth status` 表示本机已完成过登录并保存身份，不代表远程 token 仍然有效。由于 Demo 没有业务请求，这已足够用于连接器登录与身份识别演示。
+CLI 不保存飞书 `user_access_token` / `refresh_token`（它根本拿不到）。`auth status` 表示本机持有后端会话；`whoami` 会实时向后端校验该会话。
 
-## 8. 本机、内网、公网和云电脑
-
-| 场景 | 是否需要远程服务 | 说明 |
-| --- | --- | --- |
-| 本地电脑运行 CLI 和浏览器 | 不需要 | 回调到本机 `127.0.0.1` |
-| 同一台云电脑运行 CLI 和浏览器 | 不需要 | 回调到云电脑自身 |
-| 内网电脑可访问飞书公网 | 不需要 | 内网仅影响出网策略 |
-| CLI 在远程机器、浏览器在本机 | 需要端口转发或其他回调方案 | 两边的 `127.0.0.1` 不是同一台机器 |
-| 豆包在用户电脑执行 CLI | 不需要 | 适合当前 Demo |
-| 豆包在云端容器执行，浏览器在用户电脑 | 当前方案不适用 | 需要公网 HTTPS 回调服务或平台回调转发 |
-
-## 9. 退出码
+## 11. 退出码
 
 | 退出码 | 含义 |
 | --- | --- |
 | `0` | 命令成功 |
-| `1` | 当前未登录 |
-| `2` | 参数、配置、本地存储或网络错误 |
-| `3` | 授权拒绝、失败、超时或取消 |
+| `1` | 当前未登录（或会话已失效） |
+| `2` | 参数、配置、本地存储或后端通信错误 |
+| `3` | 授权被拒绝、失败或超时 |
 
-## 10. 开发验证
+## 12. 开发验证
 
 项目没有第三方运行时依赖：
 
@@ -206,10 +197,10 @@ npm test
 npm run pack:dry-run
 ```
 
-飞书接口：
+调试：设置 `DOUBAO_LOGIN_DEMO_DEBUG=1` 后，后端在换取身份失败时会在日志中附带飞书返回的 HTTP 状态、`code` 和 `msg`。
 
-- `GET https://accounts.feishu.cn/open-apis/authen/v1/authorize`
+后端访问的飞书接口：
+
+- `GET  https://accounts.feishu.cn/open-apis/authen/v1/authorize`
 - `POST https://accounts.feishu.cn/oauth/v3/token`
-- `GET https://open.feishu.cn/open-apis/authen/v1/user_info`
-- `POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal`
-- `GET https://open.feishu.cn/open-apis/contact/v3/users/{open_id}`
+- `GET  https://open.feishu.cn/open-apis/authen/v1/user_info`

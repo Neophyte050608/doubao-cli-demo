@@ -5,7 +5,10 @@ import process from 'node:process'
 import {fileURLToPath} from 'node:url'
 import {realpath} from 'node:fs/promises'
 
+import {createBackendClient} from './backend.mjs'
+import {loadConfig} from './config.mjs'
 import {CliError} from './errors.mjs'
+import {loadDotEnv} from './env.mjs'
 import {login} from './login.mjs'
 import {
   SessionStoreCorruptedError,
@@ -22,10 +25,10 @@ const EXIT_AUTH = 3
 export const ROOT_HELP = `Usage: doubao-login-demo <command> [options]
 
 Commands:
-  auth login             Sign in with Feishu OAuth
-  auth status [--json]   Check the saved login status
+  auth login             Sign in with Feishu via the backend
+  auth status [--json]   Check the saved login status (local)
   auth logout [--json]   Remove the saved login
-  whoami [--json]        Show the signed-in Feishu user
+  whoami [--json]        Ask the backend who you are (live /api/me)
 
 Options:
   --help                 Show this help
@@ -43,19 +46,24 @@ export function createRuntimeDependencies(overrides = {}) {
   const sessionStore = overrides.sessionStore ?? createSessionStore({
     directory: getDataDirectory({environment}),
   })
+  const fetchImpl = overrides.fetchImpl ?? fetch
   return {
     version: overrides.version ?? VERSION,
     stdout: overrides.stdout ?? process.stdout,
     stderr: overrides.stderr ?? process.stderr,
     now: overrides.now ?? (() => new Date()),
     sessionStore,
+    environment,
+    fetchImpl,
     login: overrides.login ?? (() => login({
       environment,
-      fetchImpl: overrides.fetchImpl ?? fetch,
+      fetchImpl,
       spawnImpl: overrides.spawnImpl ?? spawn,
       platform: overrides.platform ?? process.platform,
       stderr: overrides.stderr ?? process.stderr,
     })),
+    createBackend: overrides.createBackend ?? ((config) =>
+      createBackendClient({backendUrl: config.backendUrl, fetchImpl})),
   }
 }
 
@@ -92,12 +100,19 @@ export async function runCli(argv, dependencies = createRuntimeDependencies()) {
     }
 
     if (sameArgs(argv, ['auth', 'login'])) {
-      const user = await dependencies.login()
+      const {sessionToken} = await dependencies.login()
+      const config = loadConfig(dependencies.environment)
+      const backend = dependencies.createBackend(config)
+      const user = await backend.fetchMe(sessionToken)
+      if (!user) {
+        throw new CliError('LOGIN_FAILED', 'The backend rejected the new session token.')
+      }
       await sessionStore.write({
         version: 1,
+        sessionToken,
         name: user.name,
         openId: user.openId,
-        employeeId: user.employeeId,
+        unionId: user.unionId,
         authenticatedAt: dependencies.now().toISOString(),
       })
       stdout.write(`Logged in as ${user.name}\n`)
@@ -112,9 +127,9 @@ export async function runCli(argv, dependencies = createRuntimeDependencies()) {
         return EXIT_NOT_LOGGED_IN
       }
       if (json) {
-        stdout.write(`${JSON.stringify({loggedIn: true, user: {name: session.name, openId: session.openId, employeeId: session.employeeId}, authenticatedAt: session.authenticatedAt})}\n`)
+        stdout.write(`${JSON.stringify({loggedIn: true, user: {name: session.name, openId: session.openId, unionId: session.unionId}, authenticatedAt: session.authenticatedAt})}\n`)
       } else {
-        stdout.write(`Logged in\nName: ${session.name}\nOpen ID: ${session.openId}\nEmployee ID: ${session.employeeId}\n`)
+        stdout.write(`Logged in\nName: ${session.name}\nOpen ID: ${session.openId}\nUnion ID: ${session.unionId}\n`)
       }
       return EXIT_OK
     }
@@ -133,10 +148,18 @@ export async function runCli(argv, dependencies = createRuntimeDependencies()) {
         stdout.write(json ? '{"loggedIn":false}\n' : 'Not logged in\n')
         return EXIT_NOT_LOGGED_IN
       }
+      const config = loadConfig(dependencies.environment)
+      const backend = dependencies.createBackend(config)
+      const user = await backend.fetchMe(session.sessionToken)
+      if (!user) {
+        await sessionStore.clear()
+        stdout.write(json ? '{"loggedIn":false}\n' : 'Not logged in\n')
+        return EXIT_NOT_LOGGED_IN
+      }
       if (json) {
-        stdout.write(`${JSON.stringify({name: session.name, openId: session.openId, employeeId: session.employeeId})}\n`)
+        stdout.write(`${JSON.stringify({name: user.name, openId: user.openId, unionId: user.unionId})}\n`)
       } else {
-        stdout.write(`Name: ${session.name}\nOpen ID: ${session.openId}\nEmployee ID: ${session.employeeId}\n`)
+        stdout.write(`Name: ${user.name}\nOpen ID: ${user.openId}\nUnion ID: ${user.unionId}\n`)
       }
       return EXIT_OK
     }
@@ -163,8 +186,6 @@ function isAuthenticationFailure(error) {
     'AUTHORIZATION_DENIED',
     'AUTHORIZATION_FAILED',
     'AUTHORIZATION_TIMEOUT',
-    'AUTHORIZATION_CANCELLED',
-    'STATE_MISMATCH',
   ].includes(error.code)
 }
 
@@ -189,5 +210,6 @@ async function isMainModule() {
 }
 
 if (await isMainModule()) {
+  await loadDotEnv()
   process.exitCode = await run()
 }

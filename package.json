@@ -1,13 +1,14 @@
 {
   "name": "doubao-login-demo",
   "version": "0.1.0",
-  "description": "Minimal standalone Feishu OAuth login demo for Doubao CLI integration",
+  "description": "Minimal Feishu OAuth login demo (CLI + backend) for Doubao CLI integration",
   "type": "module",
   "bin": {
     "doubao-login-demo": "./src/cli.mjs"
   },
   "scripts": {
     "start": "node ./src/cli.mjs",
+    "server": "node ./server/server.mjs",
     "test": "node --test",
     "pack:dry-run": "npm pack --dry-run"
   },
@@ -16,6 +17,7 @@
   },
   "files": [
     "src/",
+    "server/",
     "README.md"
   ]
 }
