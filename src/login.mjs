@@ -15,9 +15,18 @@ const TERMINAL_FAILURES = {
   consumed: ['AUTHORIZATION_CONSUMED', 'This login session was already used. Please login again.'],
 }
 
-function terminalError(status) {
+function sanitizeAuthMessage(message) {
+  return String(message)
+    .replace(/\b(bearer)\s+[^\s,;}]+/gi, '$1 [redacted]')
+    .replace(
+      /\b(access[_ -]?token|refresh[_ -]?token|authorization|cookie|token|secret|client_secret|authorization_code)\b\s*[:=]\s*[^\s,;}]+/gi,
+      '$1=[redacted]',
+    )
+}
+
+function terminalError(status, result = {}) {
   const [code, message] = TERMINAL_FAILURES[status] ?? ['AUTHORIZATION_FAILED', 'Authorization failed.']
-  return new CliError(code, message)
+  return new CliError(result.errorCode ?? code, sanitizeAuthMessage(result.message ?? message))
 }
 
 // Normalize a single poll response into pending / authorized / terminal shapes.
@@ -31,7 +40,7 @@ export function interpretPoll(result) {
     }
     return {status: 'authorized', sessionToken: result.sessionToken, user: result.user}
   }
-  throw terminalError(result.status)
+  throw terminalError(result.status, result)
 }
 
 // Begin a login and return the metadata the user needs to authorize in a
@@ -41,6 +50,7 @@ export async function startLogin({backend, stderr = process.stderr, open = true,
   stderr.write('Authorization pending\n')
   stderr.write(`Open:          ${started.verificationUrl}\n`)
   stderr.write(`Login session: ${started.loginSessionId}\n`)
+  assertValidLoginStart(started)
   if (open) {
     try {
       await openBrowser(started.verificationUrl, {platform, spawnImpl})
@@ -49,6 +59,12 @@ export async function startLogin({backend, stderr = process.stderr, open = true,
     }
   }
   return started
+}
+
+function assertValidLoginStart(started) {
+  if (!Number.isFinite(started.pollIntervalSeconds) || started.pollIntervalSeconds <= 0) {
+    throw new CliError('LOGIN_START_FAILED', 'The backend returned an invalid poll interval.')
+  }
 }
 
 // Poll the backend until the login reaches a terminal state, honoring the

@@ -4,6 +4,7 @@ import process from 'node:process'
 import {fileURLToPath} from 'node:url'
 
 import {loadServerConfig} from './config.mjs'
+import {AuthError} from './errors.mjs'
 import {buildAuthorizationUrl, exchangeCodeForUser} from './feishu.mjs'
 
 const PENDING_TTL_MS = 5 * 60 * 1000
@@ -11,6 +12,15 @@ const POLL_INTERVAL_SECONDS = 2
 
 function token() {
   return randomBytes(32).toString('base64url')
+}
+
+function sanitizeAuthMessage(message) {
+  return String(message)
+    .replace(/\b(bearer)\s+[^\s,;}]+/gi, '$1 [redacted]')
+    .replace(
+      /\b(access[_ -]?token|refresh[_ -]?token|authorization|cookie|token|secret|client_secret|authorization_code)\b\s*[:=]\s*[^\s,;}]+/gi,
+      '$1=[redacted]',
+    )
 }
 
 function sendJson(response, statusCode, body) {
@@ -22,6 +32,15 @@ function sendJson(response, statusCode, body) {
   response.end(payload)
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('\"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
 function sendHtml(response, statusCode, message) {
   response.writeHead(statusCode, {
     'Cache-Control': 'no-store',
@@ -30,7 +49,7 @@ function sendHtml(response, statusCode, message) {
   response.end(
     `<!doctype html><meta charset="utf-8"><title>Doubao CLI demo</title>` +
       `<body style="font-family:system-ui;padding:3rem;text-align:center">` +
-      `<p>${message}</p></body>`,
+      `<p>${escapeHtml(message)}</p></body>`,
   )
 }
 
@@ -100,6 +119,8 @@ export function createRequestHandler(config, {fetchImpl = fetch, now = () => Dat
       }
       if (url.searchParams.has('error') || !code) {
         record.status = 'denied'
+        record.errorCode = 'AUTHORIZATION_DENIED'
+        record.message = 'Authorization was not granted.'
         sendHtml(response, 403, 'Authorization was not granted. You may close this window.')
         return
       }
@@ -114,9 +135,11 @@ export function createRequestHandler(config, {fetchImpl = fetch, now = () => Dat
         record.user = user
         record.sessionToken = sessionToken
         sendHtml(response, 200, 'Login succeeded. You may close this window and return to the CLI.')
-      } catch {
+      } catch (error) {
         record.status = 'failed'
-        sendHtml(response, 502, 'Login failed while contacting Feishu. Please retry from the CLI.')
+        record.errorCode = error instanceof AuthError ? error.code : 'AUTHORIZATION_FAILED'
+        record.message = sanitizeAuthMessage(error instanceof Error ? error.message : 'Authorization failed.')
+        sendHtml(response, 502, `${record.message} Please retry from the CLI.`)
       }
       return
     }
@@ -139,7 +162,12 @@ export function createRequestHandler(config, {fetchImpl = fetch, now = () => Dat
       if (record.status === 'denied' || record.status === 'failed') {
         pending.delete(loginSessionId)
         stateIndex.delete(record.state)
-        sendJson(response, 200, {status: record.status, loginSessionId})
+        sendJson(response, 200, {
+          status: record.status,
+          loginSessionId,
+          errorCode: record.errorCode ?? (record.status === 'denied' ? 'AUTHORIZATION_DENIED' : 'AUTHORIZATION_FAILED'),
+          message: record.message ?? (record.status === 'denied' ? 'Authorization was not granted.' : 'Authorization failed.'),
+        })
         return
       }
       sendJson(response, 200, {status: 'pending', loginSessionId})

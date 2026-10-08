@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url'
 
 import {createBackendClient} from '../src/backend.mjs'
 import {ROOT_HELP, runCli} from '../src/cli.mjs'
-import {loadConfig} from '../src/config.mjs'
+import {createConfigStore, loadConfig} from '../src/config.mjs'
 import {openBrowser} from '../src/browser.mjs'
 import {login, interpretPoll, waitForLogin} from '../src/login.mjs'
 import {createSessionStore} from '../src/session-store.mjs'
@@ -26,6 +26,12 @@ function createChildProcess(exitCode = 0) {
   const child = new EventEmitter()
   child.unref = () => {}
   queueMicrotask(() => child.emit('close', exitCode))
+  return child
+}
+
+function createNeverClosingChildProcess() {
+  const child = new EventEmitter()
+  child.unref = () => {}
   return child
 }
 
@@ -213,6 +219,38 @@ test('browser launch rejects when the platform command exits unsuccessfully', as
   )
 })
 
+
+test('browser launch waits for the opener process to close before resolving', async () => {
+  const child = createNeverClosingChildProcess()
+  let settled = false
+  const pending = openBrowser('https://example.com/login', {
+    platform: 'darwin',
+    spawnImpl: () => child,
+  }).then(() => { settled = true })
+
+  await Promise.resolve()
+  assert.equal(settled, false)
+
+  child.emit('close', 0)
+  await pending
+  assert.equal(settled, true)
+})
+
+
+test('browser launch continues after a stuck opener timeout', async () => {
+  const child = createNeverClosingChildProcess()
+  let unrefCalled = false
+  child.unref = () => { unrefCalled = true }
+
+  await openBrowser('https://example.com/login', {
+    platform: 'darwin',
+    spawnImpl: () => child,
+    timeoutMs: 1,
+  })
+
+  assert.equal(unrefCalled, true)
+})
+
 // ---- CLI lifecycle ----
 
 function fakeBackend({
@@ -244,11 +282,12 @@ async function createCliHarness({backend = fakeBackend()} = {}) {
     stdout,
     stderr,
     dependencies: {
-      version: '0.1.0',
+      version: '0.1.1',
       stdout,
       stderr,
       environment: {DOUBAO_CLI_DEMO_BACKEND_URL: 'http://127.0.0.1:8787'},
       sessionStore: createSessionStore({directory}),
+      configStore: createConfigStore({directory}),
       createBackend: () => backend,
       spawnImpl: () => createChildProcess(),
       platform: 'darwin',
@@ -263,7 +302,7 @@ test('installed bin symlink runs the CLI entrypoint', async () => {
   await symlink(fileURLToPath(new URL('../src/cli.mjs', import.meta.url)), executable)
   const result = spawnSync(executable, ['--version'], {encoding: 'utf8'})
   assert.equal(result.status, 0)
-  assert.equal(result.stdout, '0.1.0\n')
+  assert.equal(result.stdout, '0.1.1\n')
 })
 
 test('help lists the connector commands', async () => {
@@ -354,4 +393,75 @@ test('status JSON is stable for connector detection', async () => {
     user: {name: 'Alice', openId: 'ou_alice', unionId: 'on_alice'},
     authenticatedAt: '2026-10-08T01:00:00.000Z',
   })
+})
+
+test('config host set/get/unset persists the default backend URL', async () => {
+  const harness = await createCliHarness()
+
+  assert.equal(await runCli(['config', 'host', 'set', 'https://demo.example.com/path'], harness.dependencies), 0)
+  assert.equal(harness.stdout.text(), 'Configured backend URL: https://demo.example.com\n')
+
+  const getOutput = memoryStream()
+  assert.equal(await runCli(['config', 'host', 'get'], {...harness.dependencies, stdout: getOutput}), 0)
+  assert.equal(getOutput.text(), 'https://demo.example.com\n')
+
+  const unsetOutput = memoryStream()
+  assert.equal(await runCli(['config', 'host', 'unset'], {...harness.dependencies, stdout: unsetOutput}), 0)
+  assert.equal(unsetOutput.text(), 'Cleared backend URL\n')
+
+  const afterUnset = memoryStream()
+  assert.equal(await runCli(['config', 'host', 'get', '--json'], {...harness.dependencies, stdout: afterUnset}), 0)
+  assert.deepEqual(JSON.parse(afterUnset.text()), {backendUrl: null})
+})
+
+test('persisted host is used before the environment backend URL', async () => {
+  const seen = []
+  const harness = await createCliHarness()
+  const dependencies = {
+    ...harness.dependencies,
+    createBackend: (config) => {
+      seen.push(config.backendUrl)
+      return fakeBackend()
+    },
+  }
+
+  assert.equal(await runCli(['config', 'host', 'set', 'https://persisted.example.com'], dependencies), 0)
+  assert.equal(await runCli(['auth', 'login'], {...dependencies, stdout: memoryStream()}), 0)
+  assert.deepEqual(seen, ['https://persisted.example.com'])
+})
+
+test('--host overrides the persisted and environment backend URLs', async () => {
+  const seen = []
+  const harness = await createCliHarness()
+  const dependencies = {
+    ...harness.dependencies,
+    createBackend: (config) => {
+      seen.push(config.backendUrl)
+      return fakeBackend()
+    },
+  }
+
+  assert.equal(await runCli(['config', 'host', 'set', 'https://persisted.example.com'], dependencies), 0)
+  assert.equal(await runCli(['auth', 'login', '--host', 'https://flag.example.com/path'], {...dependencies, stdout: memoryStream()}), 0)
+  assert.deepEqual(seen, ['https://flag.example.com'])
+})
+
+test('login persists the backend URL with the session and whoami reuses it', async () => {
+  const seen = []
+  const harness = await createCliHarness()
+  const dependencies = {
+    ...harness.dependencies,
+    createBackend: (config) => {
+      seen.push(config.backendUrl)
+      return fakeBackend()
+    },
+  }
+
+  assert.equal(await runCli(['auth', 'login', '--host', 'https://login.example.com'], dependencies), 0)
+  const session = await dependencies.sessionStore.read()
+  assert.equal(session.backendUrl, 'https://login.example.com')
+
+  const output = memoryStream()
+  assert.equal(await runCli(['whoami', '--json'], {...dependencies, stdout: output}), 0)
+  assert.deepEqual(seen, ['https://login.example.com', 'https://login.example.com'])
 })

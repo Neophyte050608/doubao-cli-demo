@@ -22,7 +22,7 @@ function feishuFetch({onToken} = {}) {
   return async (url) => {
     if (url === TOKEN_ENDPOINT) {
       onToken?.()
-      return Response.json({access_token: 'user-access-token'})
+      return Response.json({code: 0, access_token: 'user-access-token'})
     }
     return Response.json({
       code: 0,
@@ -95,12 +95,21 @@ test('exchangeCodeForUser returns only name/open_id/union_id', async () => {
   const requests = []
   const fetchImpl = async (url, options = {}) => {
     requests.push({url, options})
-    if (url === TOKEN_ENDPOINT) return Response.json({access_token: 'user-access-token'})
+    if (url === TOKEN_ENDPOINT) return Response.json({code: 0, access_token: 'user-access-token'})
     return Response.json({code: 0, data: {name: '示例用户', open_id: 'ou_demo', union_id: 'on_demo'}})
   }
   const user = await exchangeCodeForUser(config, 'one-time-code', fetchImpl)
   assert.deepEqual(user, {name: '示例用户', openId: 'ou_demo', unionId: 'on_demo'})
   assert.equal(requests[0].url, TOKEN_ENDPOINT)
+  assert.equal(requests[0].options.method, 'POST')
+  assert.equal(requests[0].options.headers['Content-Type'], 'application/json; charset=utf-8')
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    grant_type: 'authorization_code',
+    client_id: 'cli_demo',
+    client_secret: 'app-secret-value',
+    code: 'one-time-code',
+    redirect_uri: 'http://127.0.0.1:8787/auth/callback',
+  })
   assert.equal(requests[1].url, USER_INFO_ENDPOINT)
   assert.equal(requests[1].options.headers.Authorization, 'Bearer user-access-token')
 })
@@ -118,6 +127,35 @@ test('exchange failures never leak the secret or code', async () => {
       return true
     },
   )
+})
+
+test('callback exchange failure is returned to poll without leaking secrets', async () => {
+  const handler = createRequestHandler(config, {
+    fetchImpl: async (url) => {
+      assert.equal(url, TOKEN_ENDPOINT)
+      return Response.json({code: 20024, msg: 'redirect_uri mismatch'}, {status: 400})
+    },
+  })
+
+  const start = await invoke(handler, {method: 'POST', path: '/auth/start'})
+  const {loginSessionId, verificationUrl} = start.json()
+  const state = new URL(verificationUrl).searchParams.get('state')
+
+  const callback = await invoke(handler, {
+    method: 'GET',
+    path: `/auth/callback?state=${state}&code=one-time-code`,
+  })
+  assert.equal(callback.statusCode, 502)
+  assert.equal(callback.body.includes('app-secret-value'), false)
+  assert.equal(callback.body.includes('one-time-code'), false)
+
+  const poll = await invoke(handler, {method: 'POST', path: '/auth/poll', body: {loginSessionId}})
+  assert.deepEqual(poll.json(), {
+    status: 'failed',
+    loginSessionId,
+    errorCode: 'TOKEN_EXCHANGE_FAILED',
+    message: 'Failed to exchange the authorization code.',
+  })
 })
 
 test('full backend handshake: start -> callback -> poll -> /api/me', async () => {

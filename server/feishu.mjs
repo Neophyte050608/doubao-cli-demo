@@ -6,16 +6,32 @@ import {AuthError} from './errors.mjs'
 // these directly, because exchanging the code requires the app secret.
 export const AUTHORIZATION_ENDPOINT =
   'https://accounts.feishu.cn/open-apis/authen/v1/authorize'
-export const TOKEN_ENDPOINT = 'https://accounts.feishu.cn/oauth/v3/token'
+export const TOKEN_ENDPOINT = 'https://open.feishu.cn/open-apis/authen/v2/oauth/token'
 export const USER_INFO_ENDPOINT =
   'https://open.feishu.cn/open-apis/authen/v1/user_info'
 
-function debugDetail(stage, response, body) {
+function debugDetail(stage, response, body, sensitiveValues = []) {
   if (!process.env.DOUBAO_CLI_DEMO_DEBUG) return ''
   const status = response?.status ?? 'n/a'
-  const code = body?.code ?? 'n/a'
-  const msg = body?.msg ?? body?.error_description ?? body?.error ?? 'n/a'
-  return ` [debug ${stage}: http=${status} code=${code} msg=${msg}]`
+  const providerCode = body?.code ?? 'n/a'
+  const rawMessage = body?.msg ?? body?.error_description ?? body?.error ?? 'n/a'
+  const msg = sanitizeProviderMessage(rawMessage, sensitiveValues)
+  return ` [debug ${stage}: http=${status} provider_code=${providerCode} msg=${msg}]`
+}
+
+function sanitizeProviderMessage(message, sensitiveValues) {
+  let sanitized = String(message)
+    .replace(/\b(bearer)\s+[^\s,;}]+/gi, '$1 [redacted]')
+    .replace(
+      /\b(access[_ -]?token|refresh[_ -]?token|authorization|cookie|token|secret|client_secret|authorization_code)\b\s*[:=]\s*[^\s,;}]+/gi,
+      '$1=[redacted]',
+    )
+  for (const value of sensitiveValues) {
+    if (typeof value === 'string' && value) {
+      sanitized = sanitized.replaceAll(value, '[redacted]')
+    }
+  }
+  return sanitized
 }
 
 export function buildAuthorizationUrl({appId, redirectUri, state}) {
@@ -46,14 +62,14 @@ export async function exchangeCodeForUser(config, code, fetchImpl = fetch) {
     try {
       tokenResponse = await fetchImpl(TOKEN_ENDPOINT, {
         method: 'POST',
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: new URLSearchParams({
+        headers: {'Content-Type': 'application/json; charset=utf-8'},
+        body: JSON.stringify({
           grant_type: 'authorization_code',
           client_id: config.appId,
           client_secret: config.appSecret,
           code,
           redirect_uri: config.redirectUri,
-        }).toString(),
+        }),
       })
     } catch {
       throw new AuthError(
@@ -64,10 +80,10 @@ export async function exchangeCodeForUser(config, code, fetchImpl = fetch) {
 
     const tokenBody = await readJson(tokenResponse)
     userAccessToken = tokenBody?.access_token
-    if (!tokenResponse.ok || typeof userAccessToken !== 'string' || !userAccessToken) {
+    if (!tokenResponse.ok || tokenBody?.code !== 0 || typeof userAccessToken !== 'string' || !userAccessToken) {
       throw new AuthError(
         'TOKEN_EXCHANGE_FAILED',
-        'Failed to exchange the authorization code.',
+        `Failed to exchange the authorization code.${debugDetail('token', tokenResponse, tokenBody, [config.appSecret, code])}`,
       )
     }
 
@@ -100,7 +116,7 @@ export async function exchangeCodeForUser(config, code, fetchImpl = fetch) {
     ) {
       throw new AuthError(
         'USER_INFO_FAILED',
-        `Failed to retrieve the current Feishu user.${debugDetail('user_info', userResponse, userBody)}`,
+        `Failed to retrieve the current Feishu user.${debugDetail('user_info', userResponse, userBody, [userAccessToken])}`,
       )
     }
 

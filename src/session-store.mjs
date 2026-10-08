@@ -133,12 +133,13 @@ function isEncryptedPayload(value) {
 
 function isStoredSession(value) {
   return isRecord(value) && value.version === 1
+    && (value.backendUrl === undefined || (typeof value.backendUrl === 'string' && value.backendUrl.length > 0))
     && typeof value.sessionToken === 'string' && value.sessionToken.length > 0
     && typeof value.name === 'string' && value.name.length > 0
     && typeof value.openId === 'string' && value.openId.length > 0
     && typeof value.unionId === 'string' && value.unionId.length > 0
     && typeof value.authenticatedAt === 'string' && Number.isFinite(Date.parse(value.authenticatedAt))
-    && Object.keys(value).every((key) => ['version', 'sessionToken', 'name', 'openId', 'unionId', 'authenticatedAt'].includes(key))
+    && Object.keys(value).every((key) => ['version', 'backendUrl', 'sessionToken', 'name', 'openId', 'unionId', 'authenticatedAt'].includes(key))
 }
 
 function isRecord(value) {

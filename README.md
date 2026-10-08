@@ -14,8 +14,11 @@ doubao-cli-demo auth login
 doubao-cli-demo auth login --no-wait
 doubao-cli-demo auth poll <login-session-id>
 doubao-cli-demo auth status [--json]
-doubao-cli-demo whoami [--json]
+doubao-cli-demo whoami [--json] [--host <url>]
 doubao-cli-demo auth logout [--json]
+doubao-cli-demo config host set <url>
+doubao-cli-demo config host get
+doubao-cli-demo config host unset
 ```
 
 ## 1. 工作方式
@@ -82,11 +85,22 @@ doubao-cli-demo --version      # 版本检查
 doubao-cli-demo --help
 ```
 
-CLI 只需要一个环境变量指向后端：
+CLI 默认访问 `http://127.0.0.1:8787`。如果后端不在本机，可以像 `lark-hive-cli` 一样配置默认后端地址：
 
 ```bash
-export DOUBAO_CLI_DEMO_BACKEND_URL='http://<后端地址>:8787'
+doubao-cli-demo config host set 'https://<后端地址>'
+doubao-cli-demo config host get
 ```
+
+也可以对单次命令临时指定后端：
+
+```bash
+doubao-cli-demo auth login --host 'https://<后端地址>'
+doubao-cli-demo auth poll <login-session-id> --host 'https://<后端地址>'
+doubao-cli-demo whoami --host 'https://<后端地址>'
+```
+
+后端地址优先级：`--host` > `config host set` 持久化配置 > `DOUBAO_CLI_DEMO_BACKEND_URL` 环境变量 > 默认 `http://127.0.0.1:8787`。
 
 ### 4.2 部署后端（持有 App Secret 的机器，例如开发机）
 
@@ -121,7 +135,7 @@ cloudflared tunnel --url http://127.0.0.1:8787
 
 1. 后端 `.env` 的 `FEISHU_REDIRECT_URI=https://xxxx.ngrok-free.app/auth/callback`
 2. 飞书开发者后台的「重定向 URL」填同一个值
-3. CLI 的 `DOUBAO_CLI_DEMO_BACKEND_URL=https://xxxx.ngrok-free.app`
+3. CLI 的后端地址：推荐执行 `doubao-cli-demo config host set https://xxxx.ngrok-free.app`，或把 `DOUBAO_CLI_DEMO_BACKEND_URL=https://xxxx.ngrok-free.app` 注入 CLI 运行环境
 
 > 纯本机验证（CLI、后端、浏览器都在同一台机器）不需要穿透，直接用 `http://127.0.0.1:8787` 即可。
 
@@ -146,13 +160,20 @@ FEISHU_REDIRECT_URI='http://127.0.0.1:8787/auth/callback'
 PORT=8787
 ```
 
-**CLI 机器**（只需要知道后端在哪）：
+**CLI 机器**（只需要知道后端在哪；App Secret 不在这里）：
 
 ```bash
-DOUBAO_CLI_DEMO_BACKEND_URL='http://127.0.0.1:8787'
+# 方式 1：持久化保存，推荐，行为类似 lark-hive-cli
+doubao-cli-demo config host set 'http://127.0.0.1:8787'
+
+# 方式 2：环境变量，适合连接器/CI 注入
+export DOUBAO_CLI_DEMO_BACKEND_URL='http://127.0.0.1:8787'
+
+# 方式 3：单次命令覆盖
+doubao-cli-demo auth login --host 'http://127.0.0.1:8787'
 ```
 
-> 全局安装后在任意目录执行 CLI 时，若该目录没有 `.env`，用 `export DOUBAO_CLI_DEMO_BACKEND_URL=...` 指定后端地址即可。
+> 全局安装后在任意目录执行 CLI 时，如果没有持久化配置、当前目录也没有 `.env`，才需要 `export DOUBAO_CLI_DEMO_BACKEND_URL=...`。
 
 不要把真实 App Secret 写入源码、GitHub、普通文档或截图。App Secret 只存在于**后端机器**，绝不进入 CLI 分发物。`.env` 已在 `.gitignore` 中；曾经粘贴到聊天里的 Secret 应先在开发者后台重置。
 
@@ -169,6 +190,7 @@ npm run server
 **第二步，用 CLI 登录并查身份**：
 
 ```bash
+doubao-cli-demo config host set http://127.0.0.1:8787  # 后端不在默认地址时改成实际地址
 doubao-cli-demo auth login     # 浏览器授权，成功后：Logged in as 示例用户
 doubao-cli-demo auth status    # 本地检查，已登录首行固定 "Logged in"
 doubao-cli-demo whoami --json  # 实时调用后端 /api/me
@@ -208,13 +230,14 @@ doubao-cli-demo auth logout
 | 安装命令 | `npm install --global https://github.com/Neophyte050608/doubao-cli-demo.git` |
 | 版本检查命令 | `doubao-cli-demo --version` |
 | 帮助命令 | `doubao-cli-demo --help` |
+| 后端地址预配置命令 | `doubao-cli-demo config host set <你的后端 URL>` |
 | 授权（登录）命令 | `doubao-cli-demo auth login` |
 | 授权状态命令 | `doubao-cli-demo auth status` |
 | 已登录匹配正则 | `^Logged in$` |
 | 取消授权（退出）命令 | `doubao-cli-demo auth logout` |
 | 当前用户命令 | `doubao-cli-demo whoami --json` |
 
-Connector 运行 CLI 时必须能读取 `DOUBAO_CLI_DEMO_BACKEND_URL`（后端地址）。App Secret 等飞书凭证只需配置在**后端**运行环境，不要注入到 CLI。
+如果连接器支持安装后/授权前执行预配置命令，优先用 `doubao-cli-demo config host set <你的后端 URL>`；否则把 `DOUBAO_CLI_DEMO_BACKEND_URL=<你的后端 URL>` 注入连接器运行 CLI 的环境。App Secret 等飞书凭证只需配置在**后端**运行环境，不要注入到 CLI。
 
 ## 9. 本机、内网、公网和云电脑
 
@@ -228,7 +251,7 @@ Connector 运行 CLI 时必须能读取 `DOUBAO_CLI_DEMO_BACKEND_URL`（后端�
 | 豆包在云端执行 CLI，用户在本地浏览器授权 | **公网 HTTPS 后端** | 回调地址必须是浏览器可达的公网 URL |
 | 多用户 / 正式环境 | 公网 HTTPS 后端 | 推荐，`FEISHU_REDIRECT_URI` 配公网域名 |
 
-CLI 可以在任意机器，只要它能访问 `DOUBAO_CLI_DEMO_BACKEND_URL`；浏览器只要能访问后端的 `/auth/callback`。
+CLI 可以在任意机器，只要它能访问已配置的后端 URL；浏览器只要能访问后端的 `/auth/callback`。
 
 ## 10. 本地状态与安全边界
 
@@ -239,7 +262,8 @@ CLI 默认保存位置：
 
 文件：
 
-- `session.json.enc`：AES-256-GCM 加密后的会话（含后端下发的 `sessionToken` 与缓存身份）；
+- `config.json`：持久化的默认后端地址（由 `config host set/get/unset` 管理）；
+- `session.json.enc`：AES-256-GCM 加密后的会话（含后端下发的 `sessionToken`、登录时后端地址与缓存身份）；
 - `session.key`：本机随机密钥（POSIX 权限 `0600`）。
 
 CLI 不保存飞书 `user_access_token` / `refresh_token`（它根本拿不到）。`auth status` 表示本机持有后端会话；`whoami` 会实时向后端校验该会话。
