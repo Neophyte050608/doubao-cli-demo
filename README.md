@@ -1,19 +1,21 @@
-# doubao-login-demo
+# doubao-cli-demo
 
 一个用于豆包企业 CLI Connector 集成验证的飞书登录 Demo，采用贴近真实业务的 **CLI + 后端** 两段式架构。
 
 - **CLI**（分发给用户）：驱动登录、保存后端下发的会话、调用后端业务接口。它**不持有** App Secret，也不直接访问飞书。
-- **后端**（你自己部署，持有 App Secret）：承接飞书 OAuth 回调、用 App Secret 换取用户身份、下发会话、提供唯一的业务接口 `GET /api/me`（返回"我是谁"）。
+- **后端**（你自己部署，持有 App Secret）：承接飞书 OAuth 回调、用 App Secret 换取用户身份、下发会话、提供唯一的业务接口 `GET /api/me`（返回“我是谁”）。
 
-Demo 使用飞书开发者后台的企业自建应用完成 OAuth，但不依赖 `lark-hive-ai`、Gateway、core-api、数据库或 Redis，也没有多余的业务功能。
+登录链路对齐 `lark-hive-ai` 的 `lark-hive-cli`：`auth start -> poll -> (cancel)` 的会话式握手。Demo 使用飞书开发者后台的企业自建应用完成 OAuth，但不依赖 `lark-hive-ai`、Gateway、core-api、数据库或 Redis，也没有多余的业务功能。
 
 ```bash
-doubao-login-demo --version
-doubao-login-demo --help
-doubao-login-demo auth login
-doubao-login-demo auth status [--json]
-doubao-login-demo whoami [--json]
-doubao-login-demo auth logout [--json]
+doubao-cli-demo --version
+doubao-cli-demo --help
+doubao-cli-demo auth login
+doubao-cli-demo auth login --no-wait
+doubao-cli-demo auth poll <login-session-id>
+doubao-cli-demo auth status [--json]
+doubao-cli-demo whoami [--json]
+doubao-cli-demo auth logout [--json]
 ```
 
 ## 1. 工作方式
@@ -21,19 +23,26 @@ doubao-login-demo auth logout [--json]
 ```text
 CLI                         后端 (持有 App Secret)              飞书
  │ auth login
- │ 1. POST /auth/start ───────────▶ 生成 state，返回授权 URL + device_code
+ │ 1. POST /auth/start ───────────▶ 生成 state，返回授权 URL + loginSessionId
  │ 2. 打开浏览器授权 ───────────────────────────────────────▶ 飞书授权页
  │                        3. 浏览器回调 ◀──────────────────────┘
  │                           GET /auth/callback?code&state
  │                           后端用 App Secret 换 token、取 user_info
  │                           生成 session_token
- │ 4. 轮询 /auth/poll ────────────▶ 完成后返回 session_token
+ │ 4. 轮询 POST /auth/poll ───────▶ 授权完成后返回 {sessionToken, user}
  │    CLI 加密保存 session_token
  │
  │ whoami → GET /api/me ──────────▶ 用 session_token 返回 {name, openId, unionId}
 ```
 
-关键点：**App Secret 只在后端**；CLI 只认识后端地址。`auth status` 是本地检查（是否持有会话），`whoami` 是**实时调用后端 `/api/me`**，用来证明"带着会话去调业务接口"这条链路真实可用。
+关键点：**App Secret 只在后端**；CLI 只认识后端地址。`auth status` 是本地检查（是否持有会话），`whoami` 是**实时调用后端 `/api/me`**，用来证明“带着会话去调业务接口”这条链路真实可用。
+
+与 `lark-hive-cli` 一致，`auth login` 默认阻塞等待授权（内部按后端下发的 `pollIntervalSeconds` 轮询，到 `expiresAt` 超时；`Ctrl+C` 会取消后端的登录会话）。也支持拆成两步：
+
+```bash
+doubao-cli-demo auth login --no-wait   # 只开始登录并打印 login-session-id，不等待
+doubao-cli-demo auth poll <login-session-id>   # 单次检查该会话；授权完成即落地登录
+```
 
 ## 2. 职责与凭证边界
 
@@ -88,7 +97,7 @@ FEISHU_REDIRECT_URI='http://127.0.0.1:8787/auth/callback'
 PORT=8787
 
 # CLI（后端地址）
-DOUBAO_LOGIN_DEMO_BACKEND_URL='http://127.0.0.1:8787'
+DOUBAO_CLI_DEMO_BACKEND_URL='http://127.0.0.1:8787'
 ```
 
 不要把真实 App Secret 写入源码、GitHub、普通文档或截图。`.env` 已在 `.gitignore` 中；曾经粘贴到聊天里的 Secret 应先在开发者后台重置。
@@ -99,16 +108,16 @@ DOUBAO_LOGIN_DEMO_BACKEND_URL='http://127.0.0.1:8787'
 
 ```bash
 npm run server
-# Doubao login demo backend listening on http://127.0.0.1:8787
+# Doubao CLI demo backend listening on http://127.0.0.1:8787
 # Feishu redirect URI: http://127.0.0.1:8787/auth/callback
 ```
 
 **第二步，用 CLI 登录并查身份**：
 
 ```bash
-doubao-login-demo auth login     # 浏览器授权，成功后：Logged in as 示例用户
-doubao-login-demo auth status    # 本地检查，已登录首行固定 "Logged in"
-doubao-login-demo whoami --json  # 实时调用后端 /api/me
+doubao-cli-demo auth login     # 浏览器授权，成功后：Logged in as 示例用户
+doubao-cli-demo auth status    # 本地检查，已登录首行固定 "Logged in"
+doubao-cli-demo whoami --json  # 实时调用后端 /api/me
 ```
 
 `whoami --json` 输出示例：
@@ -120,40 +129,41 @@ doubao-login-demo whoami --json  # 实时调用后端 /api/me
 `open_id` 是用户在本应用内的唯一标识，`union_id` 是用户在同一开发者名下所有应用间一致的标识。退出登录：
 
 ```bash
-doubao-login-demo auth logout
+doubao-cli-demo auth logout
 ```
 
 ## 7. 后端 HTTP 契约
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `POST` | `/auth/start` | 开始登录，返回 `authorizationUrl`、`deviceCode`、`pollInterval` |
+| `POST` | `/auth/start` | 开始登录，返回 `loginSessionId`、`verificationUrl`、`pollIntervalSeconds`、`expiresAt` |
 | `GET` | `/auth/callback` | 飞书回调；后端换取身份并生成会话 |
-| `GET` | `/auth/poll?device_code=` | 轮询登录结果，完成时返回 `sessionToken` |
+| `POST` | `/auth/poll` | 轮询登录结果（body `{loginSessionId}`）；`authorized` 时返回 `{sessionToken, user}` |
+| `POST` | `/auth/cancel` | 取消一个待处理的登录会话（body `{loginSessionId}`） |
 | `GET` | `/api/me` | 业务接口，`Authorization: Bearer <sessionToken>` → `{name, openId, unionId}` |
 | `GET` | `/healthz` | 健康检查 |
 
-会话存在后端内存中（demo 简化；重启即失效）。真实系统可换成持久化存储。
+`/auth/poll` 的 `status` 取值：`pending`、`authorized`、`denied`、`failed`、`expired`。授权成功的登录会话是**一次性**的（取走后再 poll 返回 `expired`）。会话存在后端内存中（demo 简化；重启即失效），真实系统可换成持久化存储。
 
 ## 8. 豆包企业 CLI Connector 配置
 
 | 配置项 | 值 |
 | --- | --- |
-| CLI 名称 | `doubao-login-demo` |
-| 可执行文件 | `doubao-login-demo` |
-| 版本命令 | `doubao-login-demo --version` |
-| 帮助命令 | `doubao-login-demo --help` |
-| 登录命令 | `doubao-login-demo auth login` |
-| 登录状态命令 | `doubao-login-demo auth status` |
+| CLI 名称 | `doubao-cli-demo` |
+| 可执行文件 | `doubao-cli-demo` |
+| 版本命令 | `doubao-cli-demo --version` |
+| 帮助命令 | `doubao-cli-demo --help` |
+| 登录命令 | `doubao-cli-demo auth login` |
+| 登录状态命令 | `doubao-cli-demo auth status` |
 | 已登录匹配正则 | `^Logged in$` |
-| 退出登录命令 | `doubao-login-demo auth logout` |
-| 当前用户命令 | `doubao-login-demo whoami --json` |
+| 退出登录命令 | `doubao-cli-demo auth logout` |
+| 当前用户命令 | `doubao-cli-demo whoami --json` |
 
-Connector 运行 CLI 时必须能读取 `DOUBAO_LOGIN_DEMO_BACKEND_URL`（后端地址）。App Secret 等飞书凭证只需配置在**后端**运行环境，不要注入到 CLI。
+Connector 运行 CLI 时必须能读取 `DOUBAO_CLI_DEMO_BACKEND_URL`（后端地址）。App Secret 等飞书凭证只需配置在**后端**运行环境，不要注入到 CLI。
 
 ## 9. 本机、内网、公网和云电脑
 
-后端承接飞书回调，所以"浏览器能否访问到后端的回调地址"决定了部署方式：
+后端承接飞书回调，所以“浏览器能否访问到后端的回调地址”决定了部署方式：
 
 | 场景 | 后端部署 | 说明 |
 | --- | --- | --- |
@@ -163,14 +173,14 @@ Connector 运行 CLI 时必须能读取 `DOUBAO_LOGIN_DEMO_BACKEND_URL`（后端
 | 豆包在云端执行 CLI，用户在本地浏览器授权 | **公网 HTTPS 后端** | 回调地址必须是浏览器可达的公网 URL |
 | 多用户 / 正式环境 | 公网 HTTPS 后端 | 推荐，`FEISHU_REDIRECT_URI` 配公网域名 |
 
-CLI 可以在任意机器，只要它能访问 `DOUBAO_LOGIN_DEMO_BACKEND_URL`；浏览器只要能访问后端的 `/auth/callback`。
+CLI 可以在任意机器，只要它能访问 `DOUBAO_CLI_DEMO_BACKEND_URL`；浏览器只要能访问后端的 `/auth/callback`。
 
 ## 10. 本地状态与安全边界
 
 CLI 默认保存位置：
 
-- macOS/Linux：`${XDG_CONFIG_HOME:-~/.config}/doubao-login-demo/`
-- Windows：`%APPDATA%\doubao-login-demo\`
+- macOS/Linux：`${XDG_CONFIG_HOME:-~/.config}/doubao-cli-demo/`
+- Windows：`%APPDATA%\doubao-cli-demo\`
 
 文件：
 
@@ -184,9 +194,9 @@ CLI 不保存飞书 `user_access_token` / `refresh_token`（它根本拿不到�
 | 退出码 | 含义 |
 | --- | --- |
 | `0` | 命令成功 |
-| `1` | 当前未登录（或会话已失效） |
+| `1` | 当前未登录（或会话已失效、`auth poll` 仍为 pending） |
 | `2` | 参数、配置、本地存储或后端通信错误 |
-| `3` | 授权被拒绝、失败或超时 |
+| `3` | 授权被拒绝、失败、取消或超时 |
 
 ## 12. 开发验证
 
@@ -197,7 +207,7 @@ npm test
 npm run pack:dry-run
 ```
 
-调试：设置 `DOUBAO_LOGIN_DEMO_DEBUG=1` 后，后端在换取身份失败时会在日志中附带飞书返回的 HTTP 状态、`code` 和 `msg`。
+调试：设置 `DOUBAO_CLI_DEMO_DEBUG=1` 后，后端在换取身份失败时会在日志中附带飞书返回的 HTTP 状态、`code` 和 `msg`。
 
 后端访问的飞书接口：
 

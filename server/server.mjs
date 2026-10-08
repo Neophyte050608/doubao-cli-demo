@@ -28,7 +28,7 @@ function sendHtml(response, statusCode, message) {
     'Content-Type': 'text/html; charset=utf-8',
   })
   response.end(
-    `<!doctype html><meta charset="utf-8"><title>Doubao login demo</title>` +
+    `<!doctype html><meta charset="utf-8"><title>Doubao CLI demo</title>` +
       `<body style="font-family:system-ui;padding:3rem;text-align:center">` +
       `<p>${message}</p></body>`,
   )
@@ -47,51 +47,53 @@ async function readRequestBody(request) {
 
 // Factory so tests can inject fetch and construct the handler without binding a port.
 export function createRequestHandler(config, {fetchImpl = fetch, now = () => Date.now()} = {}) {
-  // deviceCode -> {state, status, user?, sessionToken?, createdAt}
+  // loginSessionId -> {state, status, user?, sessionToken?, createdAt}
   const pending = new Map()
-  // state -> deviceCode (callback only knows the state)
+  // state -> loginSessionId (the callback only knows the OAuth state)
   const stateIndex = new Map()
   // sessionToken -> {name, openId, unionId, authenticatedAt}
   const sessions = new Map()
 
   function sweep() {
     const cutoff = now() - PENDING_TTL_MS
-    for (const [deviceCode, record] of pending) {
+    for (const [loginSessionId, record] of pending) {
       if (record.createdAt < cutoff) {
-        pending.delete(deviceCode)
+        pending.delete(loginSessionId)
         stateIndex.delete(record.state)
       }
     }
   }
 
-  async function handle(request, response, url) {
+  async function handle(request, response, url, body) {
     // 1. CLI asks the backend to begin a login. Backend owns state + the
-    //    authorization URL; CLI never sees the app secret.
+    //    authorization URL; the CLI never sees the app secret.
     if (request.method === 'POST' && url.pathname === '/auth/start') {
       sweep()
       const state = token()
-      const deviceCode = token()
-      pending.set(deviceCode, {state, status: 'pending', createdAt: now()})
-      stateIndex.set(state, deviceCode)
+      const loginSessionId = `cls_${token()}`
+      const createdAt = now()
+      pending.set(loginSessionId, {state, status: 'pending', createdAt})
+      stateIndex.set(state, loginSessionId)
       sendJson(response, 200, {
-        authorizationUrl: buildAuthorizationUrl({
+        loginSessionId,
+        verificationUrl: buildAuthorizationUrl({
           appId: config.appId,
           redirectUri: config.redirectUri,
           state,
         }),
-        deviceCode,
-        pollInterval: POLL_INTERVAL_SECONDS,
+        pollIntervalSeconds: POLL_INTERVAL_SECONDS,
+        expiresAt: new Date(createdAt + PENDING_TTL_MS).toISOString(),
       })
       return
     }
 
     // 2. Feishu redirects the browser here with the one-time code. The backend
-    //    exchanges it (using the secret) and links the result to the device code.
+    //    exchanges it (using the secret) and links the result to the session.
     if (request.method === 'GET' && url.pathname === config.callbackPath) {
       const state = url.searchParams.get('state')
       const code = url.searchParams.get('code')
-      const deviceCode = state ? stateIndex.get(state) : undefined
-      const record = deviceCode ? pending.get(deviceCode) : undefined
+      const loginSessionId = state ? stateIndex.get(state) : undefined
+      const record = loginSessionId ? pending.get(loginSessionId) : undefined
       if (!record) {
         sendHtml(response, 400, 'Login session not found or expired. Please retry from the CLI.')
         return
@@ -108,7 +110,8 @@ export function createRequestHandler(config, {fetchImpl = fetch, now = () => Dat
           ...user,
           authenticatedAt: new Date(now()).toISOString(),
         })
-        record.status = 'complete'
+        record.status = 'authorized'
+        record.user = user
         record.sessionToken = sessionToken
         sendHtml(response, 200, 'Login succeeded. You may close this window and return to the CLI.')
       } catch {
@@ -118,28 +121,40 @@ export function createRequestHandler(config, {fetchImpl = fetch, now = () => Dat
       return
     }
 
-    // 3. CLI polls with its private device code until the browser flow finishes.
-    if (request.method === 'GET' && url.pathname === '/auth/poll') {
-      const deviceCode = url.searchParams.get('device_code')
-      const record = deviceCode ? pending.get(deviceCode) : undefined
+    // 3. CLI polls with the login session id until the browser flow finishes.
+    if (request.method === 'POST' && url.pathname === '/auth/poll') {
+      const loginSessionId = typeof body?.loginSessionId === 'string' ? body.loginSessionId : ''
+      const record = loginSessionId ? pending.get(loginSessionId) : undefined
       if (!record) {
-        sendJson(response, 404, {status: 'expired'})
+        sendJson(response, 200, {status: 'expired', loginSessionId})
         return
       }
-      if (record.status === 'complete') {
-        const sessionToken = record.sessionToken
-        pending.delete(deviceCode)
+      if (record.status === 'authorized') {
+        const {sessionToken, user} = record
+        pending.delete(loginSessionId)
         stateIndex.delete(record.state)
-        sendJson(response, 200, {status: 'complete', sessionToken})
+        sendJson(response, 200, {status: 'authorized', loginSessionId, sessionToken, user})
         return
       }
       if (record.status === 'denied' || record.status === 'failed') {
-        pending.delete(deviceCode)
+        pending.delete(loginSessionId)
         stateIndex.delete(record.state)
-        sendJson(response, 200, {status: record.status})
+        sendJson(response, 200, {status: record.status, loginSessionId})
         return
       }
-      sendJson(response, 200, {status: 'pending'})
+      sendJson(response, 200, {status: 'pending', loginSessionId})
+      return
+    }
+
+    // 3b. Best-effort cancel of a pending login (e.g. CLI received Ctrl+C).
+    if (request.method === 'POST' && url.pathname === '/auth/cancel') {
+      const loginSessionId = typeof body?.loginSessionId === 'string' ? body.loginSessionId : ''
+      const record = loginSessionId ? pending.get(loginSessionId) : undefined
+      if (record) {
+        pending.delete(loginSessionId)
+        stateIndex.delete(record.state)
+      }
+      sendJson(response, 200, {status: 'cancelled', loginSessionId})
       return
     }
 
@@ -174,8 +189,8 @@ export function createRequestHandler(config, {fetchImpl = fetch, now = () => Dat
   return async function requestHandler(request, response) {
     const url = new URL(request.url ?? '/', 'http://localhost')
     try {
-      if (request.method === 'POST') await readRequestBody(request)
-      await handle(request, response, url)
+      const body = request.method === 'POST' ? await readRequestBody(request) : undefined
+      await handle(request, response, url, body)
     } catch {
       if (!response.headersSent) sendJson(response, 500, {error: 'internal_error'})
       else response.end()
@@ -197,6 +212,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const server = await startServer(config)
   const address = server.address()
   const shownPort = typeof address === 'object' && address ? address.port : config.port
-  process.stderr.write(`Doubao login demo backend listening on http://127.0.0.1:${shownPort}\n`)
+  process.stderr.write(`Doubao CLI demo backend listening on http://127.0.0.1:${shownPort}\n`)
   process.stderr.write(`Feishu redirect URI: ${config.redirectUri}\n`)
 }

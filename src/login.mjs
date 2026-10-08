@@ -2,58 +2,91 @@ import {spawn} from 'node:child_process'
 import process from 'node:process'
 import {setTimeout as delay} from 'node:timers/promises'
 
-import {createBackendClient} from './backend.mjs'
-import {loadConfig} from './config.mjs'
 import {openBrowser} from './browser.mjs'
 import {CliError} from './errors.mjs'
 
-const LOGIN_TIMEOUT_MS = 5 * 60 * 1000
+// Terminal poll statuses that mean the login will never succeed. Mirrors the
+// set lark-hive-cli maps from its gateway auth contract.
+const TERMINAL_FAILURES = {
+  denied: ['AUTHORIZATION_DENIED', 'Authorization was denied or cancelled.'],
+  cancelled: ['AUTHORIZATION_CANCELLED', 'Login was cancelled.'],
+  expired: ['AUTHORIZATION_TIMEOUT', 'The login session expired before completion.'],
+  failed: ['AUTHORIZATION_FAILED', 'The backend failed to complete authorization.'],
+  consumed: ['AUTHORIZATION_CONSUMED', 'This login session was already used. Please login again.'],
+}
 
-// Drive the login handshake against the backend:
-//   start -> open browser -> poll until the backend finishes the OAuth exchange.
-// Returns the backend-issued session token (no Feishu tokens ever reach the CLI).
+function terminalError(status) {
+  const [code, message] = TERMINAL_FAILURES[status] ?? ['AUTHORIZATION_FAILED', 'Authorization failed.']
+  return new CliError(code, message)
+}
+
+// Normalize a single poll response into pending / authorized / terminal shapes.
+export function interpretPoll(result) {
+  if (result.status === 'pending') {
+    return {status: 'pending'}
+  }
+  if (result.status === 'authorized') {
+    if (!result.sessionToken || !result.user) {
+      throw new CliError('LOGIN_FAILED', 'The backend authorized the login without a session.')
+    }
+    return {status: 'authorized', sessionToken: result.sessionToken, user: result.user}
+  }
+  throw terminalError(result.status)
+}
+
+// Begin a login and return the metadata the user needs to authorize in a
+// browser. The backend owns the OAuth state and app secret.
+export async function startLogin({backend, stderr = process.stderr, open = true, spawnImpl = spawn, platform = process.platform}) {
+  const started = await backend.start()
+  stderr.write('Authorization pending\n')
+  stderr.write(`Open:          ${started.verificationUrl}\n`)
+  stderr.write(`Login session: ${started.loginSessionId}\n`)
+  if (open) {
+    try {
+      await openBrowser(started.verificationUrl, {platform, spawnImpl})
+    } catch {
+      stderr.write(`Could not open a browser. Open the URL above manually.\n`)
+    }
+  }
+  return started
+}
+
+// Poll the backend until the login reaches a terminal state, honoring the
+// server-provided interval and expiry (like lark-hive-cli's wait loop).
+export async function waitForLogin({
+  backend,
+  started,
+  sleep = (ms) => delay(ms),
+  now = () => Date.now(),
+  signal,
+}) {
+  const expiresAt = started.expiresAt ? Date.parse(started.expiresAt) : Number.POSITIVE_INFINITY
+  for (;;) {
+    if (signal?.aborted) {
+      await backend.cancel(started.loginSessionId).catch(() => {})
+      throw terminalError('cancelled')
+    }
+    if (now() >= expiresAt) {
+      throw terminalError('expired')
+    }
+    const outcome = interpretPoll(await backend.poll(started.loginSessionId))
+    if (outcome.status === 'authorized') {
+      return {sessionToken: outcome.sessionToken, user: outcome.user}
+    }
+    await sleep(started.pollIntervalSeconds * 1000)
+  }
+}
+
+// Interactive login: start, open the browser, then wait for authorization.
 export async function login({
-  environment = process.env,
-  fetchImpl = fetch,
+  backend,
   spawnImpl = spawn,
   platform = process.platform,
   stderr = process.stderr,
   sleep = (ms) => delay(ms),
   now = () => Date.now(),
-} = {}) {
-  const config = loadConfig(environment)
-  const backend = createBackendClient({backendUrl: config.backendUrl, fetchImpl})
-
-  const {authorizationUrl, deviceCode, pollInterval} = await backend.startAuth()
-
-  stderr.write('Waiting for Feishu authorization in your browser...\n')
-  try {
-    await openBrowser(authorizationUrl, {platform, spawnImpl})
-  } catch {
-    stderr.write(`Could not open a browser. Open this URL manually:\n${authorizationUrl}\n`)
-  }
-
-  const deadline = now() + LOGIN_TIMEOUT_MS
-  for (;;) {
-    const result = await backend.pollAuth(deviceCode)
-    if (result.status === 'complete') {
-      if (!result.sessionToken) {
-        throw new CliError('LOGIN_FAILED', 'The backend completed login without a session token.')
-      }
-      return {sessionToken: result.sessionToken}
-    }
-    if (result.status === 'denied') {
-      throw new CliError('AUTHORIZATION_DENIED', 'Authorization was denied or cancelled.')
-    }
-    if (result.status === 'failed') {
-      throw new CliError('AUTHORIZATION_FAILED', 'The backend failed to complete authorization.')
-    }
-    if (result.status === 'expired') {
-      throw new CliError('AUTHORIZATION_TIMEOUT', 'The login session expired before completion.')
-    }
-    if (now() >= deadline) {
-      throw new CliError('AUTHORIZATION_TIMEOUT', 'Authorization timed out after 5 minutes.')
-    }
-    await sleep(pollInterval * 1000)
-  }
+  signal,
+}) {
+  const started = await startLogin({backend, stderr, spawnImpl, platform})
+  return waitForLogin({backend, started, sleep, now, signal})
 }

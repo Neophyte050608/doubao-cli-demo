@@ -8,7 +8,7 @@ const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8787'
 // Feishu app secret: all OAuth happens on the backend.
 export function loadConfig(environment = process.env) {
   const raw =
-    environment.DOUBAO_LOGIN_DEMO_BACKEND_URL?.trim() || DEFAULT_BACKEND_URL
+    environment.DOUBAO_CLI_DEMO_BACKEND_URL?.trim() || DEFAULT_BACKEND_URL
 
   let backendUrl
   try {
@@ -16,13 +16,13 @@ export function loadConfig(environment = process.env) {
   } catch {
     throw new CliError(
       'INVALID_CONFIGURATION',
-      'DOUBAO_LOGIN_DEMO_BACKEND_URL must be a valid URL.',
+      'DOUBAO_CLI_DEMO_BACKEND_URL must be a valid URL.',
     )
   }
   if (backendUrl.protocol !== 'http:' && backendUrl.protocol !== 'https:') {
     throw new CliError(
       'INVALID_CONFIGURATION',
-      'DOUBAO_LOGIN_DEMO_BACKEND_URL must use http or https.',
+      'DOUBAO_CLI_DEMO_BACKEND_URL must use http or https.',
     )
   }
 

@@ -11,7 +11,7 @@ export const USER_INFO_ENDPOINT =
   'https://open.feishu.cn/open-apis/authen/v1/user_info'
 
 function debugDetail(stage, response, body) {
-  if (!process.env.DOUBAO_LOGIN_DEMO_DEBUG) return ''
+  if (!process.env.DOUBAO_CLI_DEMO_DEBUG) return ''
   const status = response?.status ?? 'n/a'
   const code = body?.code ?? 'n/a'
   const msg = body?.msg ?? body?.error_description ?? body?.error ?? 'n/a'

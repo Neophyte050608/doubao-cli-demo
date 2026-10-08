@@ -11,7 +11,7 @@ import {createBackendClient} from '../src/backend.mjs'
 import {ROOT_HELP, runCli} from '../src/cli.mjs'
 import {loadConfig} from '../src/config.mjs'
 import {openBrowser} from '../src/browser.mjs'
-import {login} from '../src/login.mjs'
+import {login, interpretPoll, waitForLogin} from '../src/login.mjs'
 import {createSessionStore} from '../src/session-store.mjs'
 
 function memoryStream() {
@@ -44,31 +44,50 @@ test('config defaults to the loopback backend URL', () => {
 
 test('config reads and normalizes the backend URL', () => {
   assert.deepEqual(
-    loadConfig({DOUBAO_LOGIN_DEMO_BACKEND_URL: 'https://demo.example.com/'}),
+    loadConfig({DOUBAO_CLI_DEMO_BACKEND_URL: 'https://demo.example.com/'}),
     {backendUrl: 'https://demo.example.com'},
   )
 })
 
 test('config rejects a non-http backend URL', () => {
   assert.throws(
-    () => loadConfig({DOUBAO_LOGIN_DEMO_BACKEND_URL: 'ftp://demo.example.com'}),
+    () => loadConfig({DOUBAO_CLI_DEMO_BACKEND_URL: 'ftp://demo.example.com'}),
     (error) => error.code === 'INVALID_CONFIGURATION',
   )
 })
 
 // ---- backend client ----
 
-test('backend client startAuth posts to /auth/start', async () => {
+test('backend client start posts to /auth/start', async () => {
   const calls = []
   const fetchImpl = async (url, options) => {
     calls.push({url, options})
-    return Response.json({authorizationUrl: 'https://feishu/auth', deviceCode: 'dev-1', pollInterval: 2})
+    return Response.json({
+      loginSessionId: 'cls_1',
+      verificationUrl: 'https://feishu/auth',
+      pollIntervalSeconds: 2,
+      expiresAt: '2026-10-08T01:05:00.000Z',
+    })
   }
   const client = createBackendClient({backendUrl: 'http://127.0.0.1:8787', fetchImpl})
-  const result = await client.startAuth()
+  const result = await client.start()
   assert.equal(calls[0].url, 'http://127.0.0.1:8787/auth/start')
   assert.equal(calls[0].options.method, 'POST')
-  assert.deepEqual(result, {authorizationUrl: 'https://feishu/auth', deviceCode: 'dev-1', pollInterval: 2})
+  assert.equal(result.loginSessionId, 'cls_1')
+  assert.equal(result.pollIntervalSeconds, 2)
+})
+
+test('backend client poll posts the login session id', async () => {
+  const calls = []
+  const fetchImpl = async (url, options) => {
+    calls.push({url, options})
+    return Response.json({status: 'pending'})
+  }
+  const client = createBackendClient({backendUrl: 'http://127.0.0.1:8787', fetchImpl})
+  await client.poll('cls_9')
+  assert.equal(calls[0].url, 'http://127.0.0.1:8787/auth/poll')
+  assert.equal(calls[0].options.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[0].options.body), {loginSessionId: 'cls_9'})
 })
 
 test('backend client fetchMe returns null on 401', async () => {
@@ -80,28 +99,46 @@ test('backend client fetchMe returns null on 401', async () => {
 test('backend client reports an unreachable backend', async () => {
   const fetchImpl = async () => { throw new Error('ECONNREFUSED') }
   const client = createBackendClient({backendUrl: 'http://127.0.0.1:8787', fetchImpl})
-  await expectCliError(client.startAuth(), 'BACKEND_UNREACHABLE')
+  await expectCliError(client.start(), 'BACKEND_UNREACHABLE')
+})
+
+// ---- poll interpretation ----
+
+test('interpretPoll maps backend statuses to CLI outcomes', () => {
+  assert.deepEqual(interpretPoll({status: 'pending'}), {status: 'pending'})
+  assert.deepEqual(
+    interpretPoll({status: 'authorized', sessionToken: 'sess', user: {name: 'A', openId: 'o', unionId: 'u'}}),
+    {status: 'authorized', sessionToken: 'sess', user: {name: 'A', openId: 'o', unionId: 'u'}},
+  )
+  assert.throws(() => interpretPoll({status: 'denied'}), (error) => error.code === 'AUTHORIZATION_DENIED')
+  assert.throws(() => interpretPoll({status: 'expired'}), (error) => error.code === 'AUTHORIZATION_TIMEOUT')
 })
 
 // ---- login orchestration ----
 
+function scriptedBackend(pollScript) {
+  let index = 0
+  return {
+    start: async () => ({
+      loginSessionId: 'cls_9',
+      verificationUrl: 'https://feishu/auth?state=x',
+      pollIntervalSeconds: 1,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+    poll: async () => pollScript[Math.min(index++, pollScript.length - 1)],
+    cancel: async () => ({status: 'cancelled'}),
+    fetchMe: async () => ({name: 'A', openId: 'o', unionId: 'u'}),
+  }
+}
+
 test('login starts, opens the browser, polls, and returns the session token', async () => {
   const events = []
-  let polls = 0
-  const fetchImpl = async (url, options = {}) => {
-    if (url.endsWith('/auth/start')) {
-      events.push('start')
-      return Response.json({authorizationUrl: 'https://feishu/auth?state=x', deviceCode: 'dev-9', pollInterval: 1})
-    }
-    if (url.includes('/auth/poll')) {
-      polls += 1
-      return Response.json(polls < 2 ? {status: 'pending'} : {status: 'complete', sessionToken: 'sess-abc'})
-    }
-    throw new Error(`unexpected url ${url}`)
-  }
+  const backend = scriptedBackend([
+    {status: 'pending'},
+    {status: 'authorized', sessionToken: 'sess-abc', user: {name: 'A', openId: 'o', unionId: 'u'}},
+  ])
   const result = await login({
-    environment: {},
-    fetchImpl,
+    backend,
     spawnImpl: (command, args) => {
       events.push(`open:${args[0]}`)
       return createChildProcess()
@@ -110,23 +147,15 @@ test('login starts, opens the browser, polls, and returns the session token', as
     stderr: memoryStream(),
     sleep: async () => {},
   })
-  assert.deepEqual(result, {sessionToken: 'sess-abc'})
-  assert.equal(events[0], 'start')
-  assert.equal(events[1], 'open:https://feishu/auth?state=x')
-  assert.ok(polls >= 2)
+  assert.deepEqual(result, {sessionToken: 'sess-abc', user: {name: 'A', openId: 'o', unionId: 'u'}})
+  assert.equal(events[0], 'open:https://feishu/auth?state=x')
 })
 
 test('login surfaces a denied authorization', async () => {
-  const fetchImpl = async (url) => {
-    if (url.endsWith('/auth/start')) {
-      return Response.json({authorizationUrl: 'https://feishu/auth', deviceCode: 'dev-1', pollInterval: 1})
-    }
-    return Response.json({status: 'denied'})
-  }
+  const backend = scriptedBackend([{status: 'denied'}])
   await expectCliError(
     login({
-      environment: {},
-      fetchImpl,
+      backend,
       spawnImpl: () => createChildProcess(),
       platform: 'darwin',
       stderr: memoryStream(),
@@ -134,6 +163,26 @@ test('login surfaces a denied authorization', async () => {
     }),
     'AUTHORIZATION_DENIED',
   )
+})
+
+test('waitForLogin cancels and aborts when the signal fires', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let cancelled = false
+  const backend = {
+    poll: async () => ({status: 'pending'}),
+    cancel: async () => { cancelled = true; return {status: 'cancelled'} },
+  }
+  await expectCliError(
+    waitForLogin({
+      backend,
+      started: {loginSessionId: 'cls_9', pollIntervalSeconds: 1, expiresAt: new Date(Date.now() + 60_000).toISOString()},
+      sleep: async () => {},
+      signal: controller.signal,
+    }),
+    'AUTHORIZATION_CANCELLED',
+  )
+  assert.equal(cancelled, true)
 })
 
 // ---- browser launcher ----
@@ -166,17 +215,28 @@ test('browser launch rejects when the platform command exits unsuccessfully', as
 
 // ---- CLI lifecycle ----
 
-function fakeBackend(user = {name: 'Alice', openId: 'ou_alice', unionId: 'on_alice'}) {
+function fakeBackend({
+  user = {name: 'Alice', openId: 'ou_alice', unionId: 'on_alice'},
+  pollScript,
+} = {}) {
+  let index = 0
   return {
+    start: async () => ({
+      loginSessionId: 'cls_test',
+      verificationUrl: 'https://feishu/auth?state=x',
+      pollIntervalSeconds: 1,
+      expiresAt: new Date('2026-10-08T01:05:00.000Z').toISOString(),
+    }),
+    poll: async () => (pollScript
+      ? pollScript[Math.min(index++, pollScript.length - 1)]
+      : {status: 'authorized', sessionToken: 'sess-token', user}),
+    cancel: async () => ({status: 'cancelled'}),
     fetchMe: async (token) => (token ? user : null),
   }
 }
 
-async function createCliHarness({
-  login: loginImpl = async () => ({sessionToken: 'sess-token'}),
-  backendUser,
-} = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'doubao-login-demo-'))
+async function createCliHarness({backend = fakeBackend()} = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'doubao-cli-demo-'))
   const stdout = memoryStream()
   const stderr = memoryStream()
   return {
@@ -187,18 +247,19 @@ async function createCliHarness({
       version: '0.1.0',
       stdout,
       stderr,
-      environment: {DOUBAO_LOGIN_DEMO_BACKEND_URL: 'http://127.0.0.1:8787'},
+      environment: {DOUBAO_CLI_DEMO_BACKEND_URL: 'http://127.0.0.1:8787'},
       sessionStore: createSessionStore({directory}),
-      login: loginImpl,
-      createBackend: () => fakeBackend(backendUser),
+      createBackend: () => backend,
+      spawnImpl: () => createChildProcess(),
+      platform: 'darwin',
       now: () => new Date('2026-10-08T01:00:00.000Z'),
     },
   }
 }
 
 test('installed bin symlink runs the CLI entrypoint', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'doubao-login-bin-'))
-  const executable = join(directory, 'doubao-login-demo')
+  const directory = await mkdtemp(join(tmpdir(), 'doubao-cli-bin-'))
+  const executable = join(directory, 'doubao-cli-demo')
   await symlink(fileURLToPath(new URL('../src/cli.mjs', import.meta.url)), executable)
   const result = spawnSync(executable, ['--version'], {encoding: 'utf8'})
   assert.equal(result.status, 0)
@@ -247,6 +308,26 @@ test('login, status, whoami and logout form a complete lifecycle', async () => {
   assert.deepEqual(JSON.parse(afterLogout.text()), {loggedIn: false})
 })
 
+test('auth login --no-wait then auth poll completes the login', async () => {
+  const backend = fakeBackend({pollScript: [
+    {status: 'pending'},
+    {status: 'authorized', sessionToken: 'sess-token', user: {name: 'Alice', openId: 'ou_alice', unionId: 'on_alice'}},
+  ]})
+  const harness = await createCliHarness({backend})
+
+  assert.equal(await runCli(['auth', 'login', '--no-wait'], harness.dependencies), 0)
+  assert.match(harness.stderr.text(), /cls_test/)
+
+  // First poll is still pending -> exit 1, nothing persisted.
+  const pendingOut = memoryStream()
+  assert.equal(await runCli(['auth', 'poll', 'cls_test'], {...harness.dependencies, stdout: pendingOut}), 1)
+
+  // Second poll authorizes -> logged in.
+  const doneOut = memoryStream()
+  assert.equal(await runCli(['auth', 'poll', 'cls_test'], {...harness.dependencies, stdout: doneOut}), 0)
+  assert.equal(doneOut.text(), 'Logged in as Alice\n')
+})
+
 test('whoami clears the session when the backend rejects the token', async () => {
   const harness = await createCliHarness()
   await runCli(['auth', 'login'], harness.dependencies)
@@ -259,7 +340,6 @@ test('whoami clears the session when the backend rejects the token', async () =>
   assert.equal(await runCli(['whoami'], rejecting), 1)
   assert.equal(rejecting.stdout.text(), 'Not logged in\n')
 
-  // Session was cleared, so a follow-up status is also logged out.
   const after = memoryStream()
   assert.equal(await runCli(['auth', 'status'], {...harness.dependencies, stdout: after}), 1)
 })

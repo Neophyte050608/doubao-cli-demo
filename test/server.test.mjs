@@ -52,12 +52,15 @@ function fakeResponse() {
   }
 }
 
-async function invoke(handler, {method, path, headers = {}}) {
+async function invoke(handler, {method, path, headers = {}, body}) {
+  const serialized = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
   const request = {
     method,
     url: path,
     headers,
-    async *[Symbol.asyncIterator]() {},
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of serialized) yield chunk
+    },
   }
   const response = fakeResponse()
   await handler(request, response)
@@ -122,12 +125,14 @@ test('full backend handshake: start -> callback -> poll -> /api/me', async () =>
 
   const start = await invoke(handler, {method: 'POST', path: '/auth/start'})
   assert.equal(start.statusCode, 200)
-  const {authorizationUrl, deviceCode} = start.json()
-  const state = new URL(authorizationUrl).searchParams.get('state')
-  assert.ok(deviceCode)
+  const {loginSessionId, verificationUrl, pollIntervalSeconds, expiresAt} = start.json()
+  const state = new URL(verificationUrl).searchParams.get('state')
+  assert.ok(loginSessionId.startsWith('cls_'))
+  assert.equal(pollIntervalSeconds, 2)
+  assert.ok(Number.isFinite(Date.parse(expiresAt)))
 
   // Poll before callback: still pending.
-  const pending = await invoke(handler, {method: 'GET', path: `/auth/poll?device_code=${deviceCode}`})
+  const pending = await invoke(handler, {method: 'POST', path: '/auth/poll', body: {loginSessionId}})
   assert.equal(pending.json().status, 'pending')
 
   // Feishu redirects the browser to the callback.
@@ -137,14 +142,15 @@ test('full backend handshake: start -> callback -> poll -> /api/me', async () =>
   })
   assert.equal(callback.statusCode, 200)
 
-  // Poll again: complete, with a session token.
-  const complete = await invoke(handler, {method: 'GET', path: `/auth/poll?device_code=${deviceCode}`})
-  assert.equal(complete.json().status, 'complete')
-  const sessionToken = complete.json().sessionToken
+  // Poll again: authorized, with a session token and the user inline.
+  const authorized = await invoke(handler, {method: 'POST', path: '/auth/poll', body: {loginSessionId}})
+  assert.equal(authorized.json().status, 'authorized')
+  const sessionToken = authorized.json().sessionToken
   assert.ok(sessionToken)
+  assert.deepEqual(authorized.json().user, {name: '示例用户', openId: 'ou_demo', unionId: 'on_demo'})
 
-  // Device code is single-use now.
-  const expired = await invoke(handler, {method: 'GET', path: `/auth/poll?device_code=${deviceCode}`})
+  // The login session is single-use now.
+  const expired = await invoke(handler, {method: 'POST', path: '/auth/poll', body: {loginSessionId}})
   assert.equal(expired.json().status, 'expired')
 
   // The one business call.
@@ -162,6 +168,16 @@ test('full backend handshake: start -> callback -> poll -> /api/me', async () =>
   })
 })
 
+test('cancel removes a pending login session', async () => {
+  const handler = createRequestHandler(config, {fetchImpl: feishuFetch()})
+  const start = await invoke(handler, {method: 'POST', path: '/auth/start'})
+  const {loginSessionId} = start.json()
+  const cancelled = await invoke(handler, {method: 'POST', path: '/auth/cancel', body: {loginSessionId}})
+  assert.equal(cancelled.json().status, 'cancelled')
+  const afterCancel = await invoke(handler, {method: 'POST', path: '/auth/poll', body: {loginSessionId}})
+  assert.equal(afterCancel.json().status, 'expired')
+})
+
 test('/api/me rejects a missing or unknown token', async () => {
   const handler = createRequestHandler(config, {fetchImpl: feishuFetch()})
   const noToken = await invoke(handler, {method: 'GET', path: '/api/me'})
@@ -177,15 +193,13 @@ test('/api/me rejects a missing or unknown token', async () => {
 test('callback denial surfaces as a denied poll status', async () => {
   const handler = createRequestHandler(config, {fetchImpl: feishuFetch()})
   const start = await invoke(handler, {method: 'POST', path: '/auth/start'})
-  const state = new URL(start.json().authorizationUrl).searchParams.get('state')
+  const {loginSessionId, verificationUrl} = start.json()
+  const state = new URL(verificationUrl).searchParams.get('state')
   const callback = await invoke(handler, {
     method: 'GET',
     path: `/auth/callback?state=${state}&error=access_denied`,
   })
   assert.equal(callback.statusCode, 403)
-  const poll = await invoke(handler, {
-    method: 'GET',
-    path: `/auth/poll?device_code=${start.json().deviceCode}`,
-  })
+  const poll = await invoke(handler, {method: 'POST', path: '/auth/poll', body: {loginSessionId}})
   assert.equal(poll.json().status, 'denied')
 })

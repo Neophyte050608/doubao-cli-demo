@@ -16,13 +16,13 @@ export function getDataDirectory({
   platform = process.platform,
   homeDirectory = homedir(),
 } = {}) {
-  if (environment.DOUBAO_LOGIN_DEMO_HOME?.trim()) {
-    return environment.DOUBAO_LOGIN_DEMO_HOME.trim()
+  if (environment.DOUBAO_CLI_DEMO_HOME?.trim()) {
+    return environment.DOUBAO_CLI_DEMO_HOME.trim()
   }
   if (platform === 'win32') {
-    return join(environment.APPDATA || homeDirectory, 'doubao-login-demo')
+    return join(environment.APPDATA || homeDirectory, 'doubao-cli-demo')
   }
-  return join(environment.XDG_CONFIG_HOME || join(homeDirectory, '.config'), 'doubao-login-demo')
+  return join(environment.XDG_CONFIG_HOME || join(homeDirectory, '.config'), 'doubao-cli-demo')
 }
 
 export function createSessionStore({directory, replaceFile = rename}) {

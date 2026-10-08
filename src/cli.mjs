@@ -9,7 +9,7 @@ import {createBackendClient} from './backend.mjs'
 import {loadConfig} from './config.mjs'
 import {CliError} from './errors.mjs'
 import {loadDotEnv} from './env.mjs'
-import {login} from './login.mjs'
+import {interpretPoll, startLogin, waitForLogin} from './login.mjs'
 import {
   SessionStoreCorruptedError,
   createSessionStore,
@@ -22,24 +22,34 @@ const EXIT_NOT_LOGGED_IN = 1
 const EXIT_OPERATIONAL = 2
 const EXIT_AUTH = 3
 
-export const ROOT_HELP = `Usage: doubao-login-demo <command> [options]
+export const ROOT_HELP = `Usage: doubao-cli-demo <command> [options]
 
 Commands:
-  auth login             Sign in with Feishu via the backend
-  auth status [--json]   Check the saved login status (local)
-  auth logout [--json]   Remove the saved login
-  whoami [--json]        Ask the backend who you are (live /api/me)
+  auth login                 Sign in with Feishu via the backend and wait
+  auth login --no-wait       Start a login and print the session id without waiting
+  auth poll <login-session>  Check a pending login session once
+  auth status [--json]       Check the saved login status (local)
+  auth logout [--json]       Remove the saved login
+  whoami [--json]            Ask the backend who you are (live /api/me)
 
 Options:
-  --help                 Show this help
-  --version              Show the version
+  --help                     Show this help
+  --version                  Show the version
 `
 
-const AUTH_HELP = `Usage: doubao-login-demo auth <command>\n\nCommands:\n  login\n  status [--json]\n  logout [--json]\n`
-const LOGIN_HELP = 'Usage: doubao-login-demo auth login\n'
-const STATUS_HELP = 'Usage: doubao-login-demo auth status [--json]\n'
-const LOGOUT_HELP = 'Usage: doubao-login-demo auth logout [--json]\n'
-const WHOAMI_HELP = 'Usage: doubao-login-demo whoami [--json]\n'
+const AUTH_HELP = `Usage: doubao-cli-demo auth <command>
+
+Commands:
+  login [--no-wait] [--login-session-id <id>]
+  poll <login-session-id>
+  status [--json]
+  logout [--json]
+`
+const LOGIN_HELP = 'Usage: doubao-cli-demo auth login [--no-wait] [--login-session-id <id>]\n'
+const POLL_HELP = 'Usage: doubao-cli-demo auth poll <login-session-id>\n'
+const STATUS_HELP = 'Usage: doubao-cli-demo auth status [--json]\n'
+const LOGOUT_HELP = 'Usage: doubao-cli-demo auth logout [--json]\n'
+const WHOAMI_HELP = 'Usage: doubao-cli-demo whoami [--json]\n'
 
 export function createRuntimeDependencies(overrides = {}) {
   const environment = overrides.environment ?? process.env
@@ -55,16 +65,23 @@ export function createRuntimeDependencies(overrides = {}) {
     sessionStore,
     environment,
     fetchImpl,
-    login: overrides.login ?? (() => login({
-      environment,
-      fetchImpl,
-      spawnImpl: overrides.spawnImpl ?? spawn,
-      platform: overrides.platform ?? process.platform,
-      stderr: overrides.stderr ?? process.stderr,
-    })),
+    spawnImpl: overrides.spawnImpl ?? spawn,
+    platform: overrides.platform ?? process.platform,
+    signal: overrides.signal,
     createBackend: overrides.createBackend ?? ((config) =>
       createBackendClient({backendUrl: config.backendUrl, fetchImpl})),
   }
+}
+
+async function persistSession(dependencies, sessionToken, user) {
+  await dependencies.sessionStore.write({
+    version: 1,
+    sessionToken,
+    name: user.name,
+    openId: user.openId,
+    unionId: user.unionId,
+    authenticatedAt: dependencies.now().toISOString(),
+  })
 }
 
 export async function runCli(argv, dependencies = createRuntimeDependencies()) {
@@ -86,6 +103,10 @@ export async function runCli(argv, dependencies = createRuntimeDependencies()) {
       stdout.write(LOGIN_HELP)
       return EXIT_OK
     }
+    if (sameArgs(argv, ['auth', 'poll', '--help'])) {
+      stdout.write(POLL_HELP)
+      return EXIT_OK
+    }
     if (sameArgs(argv, ['auth', 'status', '--help'])) {
       stdout.write(STATUS_HELP)
       return EXIT_OK
@@ -99,24 +120,12 @@ export async function runCli(argv, dependencies = createRuntimeDependencies()) {
       return EXIT_OK
     }
 
-    if (sameArgs(argv, ['auth', 'login'])) {
-      const {sessionToken} = await dependencies.login()
-      const config = loadConfig(dependencies.environment)
-      const backend = dependencies.createBackend(config)
-      const user = await backend.fetchMe(sessionToken)
-      if (!user) {
-        throw new CliError('LOGIN_FAILED', 'The backend rejected the new session token.')
-      }
-      await sessionStore.write({
-        version: 1,
-        sessionToken,
-        name: user.name,
-        openId: user.openId,
-        unionId: user.unionId,
-        authenticatedAt: dependencies.now().toISOString(),
-      })
-      stdout.write(`Logged in as ${user.name}\n`)
-      return EXIT_OK
+    if (argv[0] === 'auth' && argv[1] === 'login') {
+      return await handleLogin(argv.slice(2), dependencies)
+    }
+
+    if (argv[0] === 'auth' && argv[1] === 'poll') {
+      return await handlePoll(argv.slice(2), dependencies)
     }
 
     if (argv[0] === 'auth' && argv[1] === 'status') {
@@ -148,8 +157,7 @@ export async function runCli(argv, dependencies = createRuntimeDependencies()) {
         stdout.write(json ? '{"loggedIn":false}\n' : 'Not logged in\n')
         return EXIT_NOT_LOGGED_IN
       }
-      const config = loadConfig(dependencies.environment)
-      const backend = dependencies.createBackend(config)
+      const backend = dependencies.createBackend(loadConfig(dependencies.environment))
       const user = await backend.fetchMe(session.sessionToken)
       if (!user) {
         await sessionStore.clear()
@@ -171,6 +179,94 @@ export async function runCli(argv, dependencies = createRuntimeDependencies()) {
   }
 }
 
+// auth login [--no-wait] [--login-session-id <id>]
+async function handleLogin(args, dependencies) {
+  const {stdout, stderr, sessionStore} = dependencies
+  const {noWait, loginSessionId} = parseLoginArgs(args)
+  const backend = dependencies.createBackend(loadConfig(dependencies.environment))
+
+  // Complete a previously started session (single check, like `auth poll`).
+  if (loginSessionId !== undefined) {
+    const outcome = interpretPoll(await backend.poll(loginSessionId))
+    if (outcome.status === 'pending') {
+      stderr.write(`Login session ${loginSessionId} is still pending; this command checks once.\n`)
+      return EXIT_NOT_LOGGED_IN
+    }
+    await persistSession(dependencies, outcome.sessionToken, outcome.user)
+    stdout.write(`Logged in as ${outcome.user.name}\n`)
+    return EXIT_OK
+  }
+
+  const started = await startLogin({
+    backend,
+    stderr,
+    open: !noWait,
+    spawnImpl: dependencies.spawnImpl,
+    platform: dependencies.platform,
+  })
+
+  if (noWait) {
+    stderr.write(`Run \`doubao-cli-demo auth poll ${started.loginSessionId}\` to finish signing in.\n`)
+    return EXIT_OK
+  }
+
+  const {sessionToken, user} = await waitForLogin({
+    backend,
+    started,
+    now: () => dependencies.now().getTime(),
+    signal: dependencies.signal,
+  })
+  await persistSession(dependencies, sessionToken, user)
+  stdout.write(`Logged in as ${user.name}\n`)
+  return EXIT_OK
+}
+
+// auth poll <login-session-id>
+async function handlePoll(args, dependencies) {
+  const {stdout, stderr} = dependencies
+  const loginSessionId = args[0]
+  if (!loginSessionId || loginSessionId.startsWith('-')) {
+    throw new CliError('USAGE', 'auth poll requires a login session id.')
+  }
+  const backend = dependencies.createBackend(loadConfig(dependencies.environment))
+  const outcome = interpretPoll(await backend.poll(loginSessionId))
+  if (outcome.status === 'pending') {
+    stderr.write(`Login session ${loginSessionId} is still pending; this command checks once.\n`)
+    return EXIT_NOT_LOGGED_IN
+  }
+  await persistSession(dependencies, outcome.sessionToken, outcome.user)
+  stdout.write(`Logged in as ${outcome.user.name}\n`)
+  return EXIT_OK
+}
+
+function parseLoginArgs(args) {
+  let noWait = false
+  let loginSessionId
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]
+    if (arg === '--no-wait') {
+      noWait = true
+    } else if (arg === '--login-session-id') {
+      loginSessionId = args[index + 1]
+      index += 1
+      if (!loginSessionId || loginSessionId.startsWith('-')) {
+        throw new CliError('USAGE', '--login-session-id requires a value.')
+      }
+    } else if (arg.startsWith('--login-session-id=')) {
+      loginSessionId = arg.slice('--login-session-id='.length)
+      if (!loginSessionId) {
+        throw new CliError('USAGE', '--login-session-id requires a value.')
+      }
+    } else {
+      throw new CliError('UNKNOWN_OPTION', `Unknown option: ${arg}`)
+    }
+  }
+  if (noWait && loginSessionId !== undefined) {
+    throw new CliError('USAGE', '--no-wait cannot be combined with --login-session-id.')
+  }
+  return {noWait, loginSessionId}
+}
+
 function parseOptionalJson(args) {
   if (args.length === 0) return false
   if (sameArgs(args, ['--json'])) return true
@@ -184,8 +280,10 @@ function sameArgs(actual, expected) {
 function isAuthenticationFailure(error) {
   return error instanceof CliError && [
     'AUTHORIZATION_DENIED',
+    'AUTHORIZATION_CANCELLED',
     'AUTHORIZATION_FAILED',
     'AUTHORIZATION_TIMEOUT',
+    'AUTHORIZATION_CONSUMED',
   ].includes(error.code)
 }
 
@@ -211,5 +309,13 @@ async function isMainModule() {
 
 if (await isMainModule()) {
   await loadDotEnv()
-  process.exitCode = await run()
+  // Allow Ctrl+C to cancel a pending login cleanly (cancels on the backend too).
+  const controller = new AbortController()
+  const onSigint = () => controller.abort()
+  process.once('SIGINT', onSigint)
+  try {
+    process.exitCode = await run(process.argv.slice(2), createRuntimeDependencies({signal: controller.signal}))
+  } finally {
+    process.off('SIGINT', onSigint)
+  }
 }
