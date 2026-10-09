@@ -51,7 +51,7 @@ async function expectCliError(promise, expectedCode) {
 
 test('config defaults to package.json config.default_host', () => {
   resetPackageDefaultBackendUrlCacheForTests()
-  assert.deepEqual(loadConfig({}), {backendUrl: 'http://127.0.0.1:8787'})
+  assert.deepEqual(loadConfig({}), {backendUrl: 'http://10.37.237.118:8787'})
 })
 
 test('config reads and normalizes the backend URL', () => {

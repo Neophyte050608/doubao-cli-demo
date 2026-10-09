@@ -89,7 +89,7 @@ CLI 的内置默认后端地址和 `lark-hive-cli` 一样放在 `package.json` �
 
 ```json
 "config": {
-  "default_host": "http://127.0.0.1:8787"
+  "default_host": "http://10.37.237.118:8787"
 }
 ```
 
@@ -145,7 +145,7 @@ cloudflared tunnel --url http://127.0.0.1:8787
 2. 飞书开发者后台的「重定向 URL」填同一个值
 3. CLI 的后端地址：如果当前安装包的 `package.json config.default_host` 已经是这个公网地址，则不用额外配置；否则执行 `doubao-cli-demo config host set https://xxxx.ngrok-free.app`，或把 `DOUBAO_CLI_DEMO_BACKEND_URL=https://xxxx.ngrok-free.app` 注入 CLI 运行环境
 
-> 纯本机验证（CLI、后端、浏览器都在同一台机器）不需要穿透，直接用 `http://127.0.0.1:8787` 即可。
+> 当前包内置默认后端是开发机 `http://10.37.237.118:8787`。纯本机验证（CLI、后端、浏览器都在同一台机器）可用 `doubao-cli-demo config host set http://127.0.0.1:8787` 临时覆盖。
 
 ### 4.4 从源码直接跑（本机开发调试）
 
@@ -201,7 +201,7 @@ npm run server
 **第二步，用 CLI 登录并查身份**：
 
 ```bash
-doubao-cli-demo config host set http://127.0.0.1:8787  # 后端不在内置默认地址时才需要
+doubao-cli-demo config host set http://127.0.0.1:8787  # 如需覆盖内置开发机地址时才需要
 doubao-cli-demo auth login     # 浏览器授权，成功后：Logged in as 示例用户
 doubao-cli-demo auth status --json  # 本地检查，便于连接器用 JSON 正则判断
 doubao-cli-demo whoami --json  # 实时调用后端 /api/me
