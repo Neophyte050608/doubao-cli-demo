@@ -8,7 +8,7 @@ import {
   buildAuthorizationUrl,
   exchangeCodeForUser,
 } from '../server/feishu.mjs'
-import {createRequestHandler} from '../server/server.mjs'
+import {CLI_TARBALL_PATH, createRequestHandler} from '../server/server.mjs'
 
 const config = {
   appId: 'cli_demo',
@@ -66,6 +66,21 @@ async function invoke(handler, {method, path, headers = {}, body}) {
   await handler(request, response)
   return response
 }
+
+
+test('backend serves the CLI tarball for internal connector installs', async () => {
+  const tarball = Buffer.from('fake tgz')
+  const handler = createRequestHandler(config, {
+    fetchImpl: feishuFetch(),
+    packTarball: async () => tarball,
+  })
+
+  const response = await invoke(handler, {method: 'GET', path: CLI_TARBALL_PATH})
+  assert.equal(response.statusCode, 200)
+  assert.equal(response.headers['Content-Type'], 'application/gzip')
+  assert.equal(response.headers['Content-Disposition'], 'attachment; filename="doubao-cli-demo.tgz"')
+  assert.equal(response.body, tarball.toString())
+})
 
 test('server config requires app credentials', () => {
   assert.throws(

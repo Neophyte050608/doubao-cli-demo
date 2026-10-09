@@ -77,10 +77,10 @@ Demo 只通过用户 OAuth 读取登录者自身的基本信息（`name`、`open
 
 ### 4.1 安装 CLI（用户机器 / 豆包连接器环境）
 
-全局安装只会得到纯 CLI（分发物只包含 `src/`，不含后端代码），暴露一个 `doubao-cli-demo` 命令：
+全局安装只会得到纯 CLI（分发物只包含 `src/`，不含后端代码），暴露一个 `doubao-cli-demo` 命令。当前企业内网测试版从开发机后端下载安装包：
 
 ```bash
-npm install --global https://github.com/Neophyte050608/doubao-cli-demo.git
+npm install --global http://10.37.237.118:8787/downloads/doubao-cli-demo.tgz
 doubao-cli-demo --version      # 版本检查
 doubao-cli-demo --help
 ```
@@ -93,7 +93,7 @@ CLI 的内置默认后端地址和 `lark-hive-cli` 一样放在 `package.json` �
 }
 ```
 
-发布云版 CLI 时，只要把这里改成云上后端，例如 `https://<你的云后端域名>`，用户安装后不额外配置也会默认连云上后端。如果某个环境需要覆盖内置默认值，再用本地配置：
+发布云版 CLI 时，只要把这里改成云上后端，例如 `https://<你的云后端域名>`，用户安装后不额外配置也会默认连云上后端。当前内网测试包默认连开发机后端 `http://10.37.237.118:8787`。如果某个环境需要覆盖内置默认值，再用本地配置：
 
 ```bash
 doubao-cli-demo config host set 'https://<后端地址>'
@@ -238,7 +238,7 @@ doubao-cli-demo auth logout
 | --- | --- |
 | CLI 名称 | `doubao-cli-demo` |
 | 可执行文件 | `doubao-cli-demo` |
-| 安装命令 | `npm install --global https://github.com/Neophyte050608/doubao-cli-demo.git` |
+| 安装命令 | `npm install --global http://10.37.237.118:8787/downloads/doubao-cli-demo.tgz` |
 | 版本检查命令 | `doubao-cli-demo --version` |
 | 帮助命令 | `doubao-cli-demo --help` |
 | 后端地址预配置命令 | 如果安装包 `config.default_host` 已是目标后端，可不填；否则填 `doubao-cli-demo config host set <你的后端 URL>` |

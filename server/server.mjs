@@ -1,7 +1,12 @@
+import {execFile} from 'node:child_process'
 import {randomBytes} from 'node:crypto'
+import {mkdtemp, readFile, rm} from 'node:fs/promises'
 import {createServer} from 'node:http'
+import {tmpdir} from 'node:os'
+import {dirname, join} from 'node:path'
 import process from 'node:process'
 import {fileURLToPath} from 'node:url'
+import {promisify} from 'node:util'
 
 import {loadServerConfig} from './config.mjs'
 import {AuthError} from './errors.mjs'
@@ -9,6 +14,11 @@ import {buildAuthorizationUrl, exchangeCodeForUser} from './feishu.mjs'
 
 const PENDING_TTL_MS = 5 * 60 * 1000
 const POLL_INTERVAL_SECONDS = 2
+export const CLI_TARBALL_PATH = '/downloads/doubao-cli-demo.tgz'
+
+const execFileAsync = promisify(execFile)
+const SERVER_DIRECTORY = dirname(fileURLToPath(import.meta.url))
+const PROJECT_ROOT = dirname(SERVER_DIRECTORY)
 
 function token() {
   return randomBytes(32).toString('base64url')
@@ -30,6 +40,16 @@ function sendJson(response, statusCode, body) {
     'Content-Type': 'application/json; charset=utf-8',
   })
   response.end(payload)
+}
+
+function sendTarball(response, body) {
+  response.writeHead(200, {
+    'Cache-Control': 'no-store',
+    'Content-Disposition': 'attachment; filename="doubao-cli-demo.tgz"',
+    'Content-Length': String(body.length),
+    'Content-Type': 'application/gzip',
+  })
+  response.end(body)
 }
 
 function escapeHtml(value) {
@@ -64,8 +84,23 @@ async function readRequestBody(request) {
   }
 }
 
+export async function packCliTarball({projectRoot = PROJECT_ROOT} = {}) {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'doubao-cli-demo-pack-'))
+  try {
+    const {stdout} = await execFileAsync('npm', ['pack', '--silent', '--pack-destination', temporaryDirectory], {
+      cwd: projectRoot,
+      maxBuffer: 1024 * 1024,
+    })
+    const filename = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1)
+    if (!filename) throw new Error('npm pack did not produce a tarball filename')
+    return readFile(join(temporaryDirectory, filename))
+  } finally {
+    await rm(temporaryDirectory, {force: true, recursive: true})
+  }
+}
+
 // Factory so tests can inject fetch and construct the handler without binding a port.
-export function createRequestHandler(config, {fetchImpl = fetch, now = () => Date.now()} = {}) {
+export function createRequestHandler(config, {fetchImpl = fetch, now = () => Date.now(), packTarball = packCliTarball} = {}) {
   // loginSessionId -> {state, status, user?, sessionToken?, createdAt}
   const pending = new Map()
   // state -> loginSessionId (the callback only knows the OAuth state)
@@ -84,6 +119,13 @@ export function createRequestHandler(config, {fetchImpl = fetch, now = () => Dat
   }
 
   async function handle(request, response, url, body) {
+    // The enterprise connector can install the CLI from the same internal
+    // backend it will later talk to, instead of reaching GitHub.
+    if (request.method === 'GET' && url.pathname === CLI_TARBALL_PATH) {
+      sendTarball(response, await packTarball())
+      return
+    }
+
     // 1. CLI asks the backend to begin a login. Backend owns state + the
     //    authorization URL; the CLI never sees the app secret.
     if (request.method === 'POST' && url.pathname === '/auth/start') {
