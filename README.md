@@ -77,10 +77,10 @@ Demo 只通过用户 OAuth 读取登录者自身的基本信息（`name`、`open
 
 ### 4.1 安装 CLI（用户机器 / 豆包连接器环境）
 
-全局安装只会得到纯 CLI（分发物只包含 `src/`，不含后端代码），暴露一个 `doubao-cli-demo` 命令。当前企业内网测试版从开发机后端下载安装包：
+全局安装只会得到纯 CLI（分发物只包含 `src/`，不含后端代码），暴露一个 `doubao-cli-demo` 命令：
 
 ```bash
-npm install --global http://10.37.237.118:8787/downloads/doubao-cli-demo.tgz
+npm install --global https://github.com/Neophyte050608/doubao-cli-demo.git
 doubao-cli-demo --version      # 版本检查
 doubao-cli-demo --help
 ```
@@ -89,11 +89,11 @@ CLI 的内置默认后端地址和 `lark-hive-cli` 一样放在 `package.json` �
 
 ```json
 "config": {
-  "default_host": "http://10.37.237.118:8787"
+  "default_host": "http://127.0.0.1:8787"
 }
 ```
 
-发布云版 CLI 时，只要把这里改成云上后端，例如 `https://<你的云后端域名>`，用户安装后不额外配置也会默认连云上后端。当前内网测试包默认连开发机后端 `http://10.37.237.118:8787`。如果某个环境需要覆盖内置默认值，再用本地配置：
+发布云版 CLI 时，只要把这里改成云上后端，例如 `https://<你的云后端域名>`，用户安装后不额外配置也会默认连云上后端。如果某个环境需要覆盖内置默认值，再用本地配置：
 
 ```bash
 doubao-cli-demo config host set 'https://<后端地址>'
@@ -145,7 +145,7 @@ cloudflared tunnel --url http://127.0.0.1:8787
 2. 飞书开发者后台的「重定向 URL」填同一个值
 3. CLI 的后端地址：如果当前安装包的 `package.json config.default_host` 已经是这个公网地址，则不用额外配置；否则执行 `doubao-cli-demo config host set https://xxxx.ngrok-free.app`，或把 `DOUBAO_CLI_DEMO_BACKEND_URL=https://xxxx.ngrok-free.app` 注入 CLI 运行环境
 
-> 当前包内置默认后端是开发机 `http://10.37.237.118:8787`。纯本机验证（CLI、后端、浏览器都在同一台机器）可用 `doubao-cli-demo config host set http://127.0.0.1:8787` 临时覆盖。
+> 纯本机验证（CLI、后端、浏览器都在同一台机器）不需要穿透，直接用 `http://127.0.0.1:8787` 即可。
 
 ### 4.4 从源码直接跑（本机开发调试）
 
@@ -201,7 +201,7 @@ npm run server
 **第二步，用 CLI 登录并查身份**：
 
 ```bash
-doubao-cli-demo config host set http://127.0.0.1:8787  # 如需覆盖内置开发机地址时才需要
+doubao-cli-demo config host set http://127.0.0.1:8787  # 后端不在内置默认地址时才需要
 doubao-cli-demo auth login     # 浏览器授权，成功后：Logged in as 示例用户
 doubao-cli-demo auth status --json  # 本地检查，便于连接器用 JSON 正则判断
 doubao-cli-demo whoami --json  # 实时调用后端 /api/me
@@ -238,7 +238,7 @@ doubao-cli-demo auth logout
 | --- | --- |
 | CLI 名称 | `doubao-cli-demo` |
 | 可执行文件 | `doubao-cli-demo` |
-| 安装命令 | `npm install --global http://10.37.237.118:8787/downloads/doubao-cli-demo.tgz` |
+| 安装命令 | `npm install --global https://github.com/Neophyte050608/doubao-cli-demo.git` |
 | 版本检查命令 | `doubao-cli-demo --version` |
 | 帮助命令 | `doubao-cli-demo --help` |
 | 后端地址预配置命令 | 如果安装包 `config.default_host` 已是目标后端，可不填；否则填 `doubao-cli-demo config host set <你的后端 URL>` |
